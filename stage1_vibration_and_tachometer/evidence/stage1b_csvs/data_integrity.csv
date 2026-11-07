@@ -1,0 +1,10 @@
+file,condition,nominal_group_hz,rows,columns,duration_s,missing_or_infinite
+horizontal_misalignment_1p5mm_31.744.csv,Horizontal misalignment,31.744,250000,8,5.0,0
+imbalance_10g_31.744.csv,Imbalance,31.744,250000,8,5.0,0
+normal_31.744.csv,Normal,31.744,250000,8,5.0,0
+horizontal_misalignment_1p5mm_45.4656.csv,Horizontal misalignment,45.4656,250000,8,5.0,0
+imbalance_10g_45.4656.csv,Imbalance,45.4656,250000,8,5.0,0
+normal_45.4656.csv,Normal,45.4656,250000,8,5.0,0
+horizontal_misalignment_1p5mm_53.8624.csv,Horizontal misalignment,53.8624,250000,8,5.0,0
+imbalance_10g_53.8624.csv,Imbalance,53.8624,250000,8,5.0,0
+normal_53.8624.csv,Normal,53.8624,250000,8,5.0,0
