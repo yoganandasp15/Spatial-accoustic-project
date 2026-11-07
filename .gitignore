@@ -45,5 +45,8 @@ $RECYCLE.BIN/
 *.pem
 *.token
 
+# Teamwork metadata
+.agents/
+
 # Explicit inclusions
 !AGENTS.md
