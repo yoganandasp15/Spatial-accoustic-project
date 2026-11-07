@@ -218,7 +218,7 @@ def audit_dual_i2s_phase(wav_path: str, output_dir: str, sound_incident_angle_de
     
     mean_inter_pair_skew_samples = float(np.mean(skew_inter_pair_samples))
     mean_inter_pair_skew_us = mean_inter_pair_skew_samples / fs * 1e6
-    comp_delay_sec = -mean_inter_pair_skew_us * 1e-6
+    comp_delay_sec = mean_inter_pair_skew_us * 1e-6
     
     # Assess synchronization status
     # Tolerable threshold: < 0.75 sample error at calibration sample rate

@@ -32,8 +32,9 @@ def extract_tachometer_revolutions(t: np.ndarray, tach_signal: np.ndarray, pulse
     # Normalize signal to [0, 1]
     sig_min = np.min(tach_signal)
     sig_max = np.max(tach_signal)
-    if sig_max - sig_min < 1e-4:
-        raise ValueError("Tachometer signal has zero dynamic range.")
+    if sig_max - sig_min < 0.5:
+        # Dynamic range below 0.5V on 3.3V logic indicates ambient analog noise, not true pulse edges
+        return np.array([], dtype=np.float64)
     norm_sig = (tach_signal - sig_min) / (sig_max - sig_min)
     
     # Dual threshold Schmitt trigger
@@ -268,6 +269,7 @@ def run_order_tracking_on_csv(csv_path: str, output_dir: str) -> dict:
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Vibration CSV not found: {csv_path}")
         
+    os.makedirs(output_dir, exist_ok=True)
     df = pd.read_csv(csv_path)
     print(f"[*] Loaded Vibration Record: {os.path.basename(csv_path)}")
     print(f"    Columns: {list(df.columns)} | Rows: {len(df)}")

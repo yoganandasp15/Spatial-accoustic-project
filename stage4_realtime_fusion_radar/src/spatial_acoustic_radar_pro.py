@@ -1359,7 +1359,7 @@ class AcousticRadarApp:
                         if "inter_pair_comp_delay_sec" in c_data:
                             self.calib_delay_sec = float(c_data["inter_pair_comp_delay_sec"])
                         elif "inter_pair_mean_skew_us" in c_data:
-                            self.calib_delay_sec = -float(c_data["inter_pair_mean_skew_us"]) * 1e-6
+                            self.calib_delay_sec = float(c_data["inter_pair_mean_skew_us"]) * 1e-6
                         print(f"[*] Acoustic Radar: Loaded Phase Calibration from {os.path.basename(c_path)}: Delay = {self.calib_delay_sec*1e6:+.2f} μs")
                         break
                 except Exception as e:

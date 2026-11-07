@@ -3,13 +3,13 @@
   "audio_source": "multimodal_4mic_audio.wav",
   "vibration_source": "multimodal_4mic_vibration.csv",
   "acoustic_spatial": {
-    "bearing_angle_deg": 9.09027692082233,
-    "radial_grid_peak_m": 0.5063595560468865,
-    "radial_distance_m": 0.5063595560468865,
-    "prominence": 1.3948804262587242,
+    "bearing_angle_deg": -2.2079003808431277,
+    "radial_grid_peak_m": 2.07654159601969,
+    "radial_distance_m": 2.07654159601969,
+    "prominence": 1.3705535829606996,
     "kurtosis": 1.3156380653381348,
     "crest_factor": 3.1604111194610596,
-    "phase_comp_delay_sec": -2.469000207553546e-05
+    "phase_comp_delay_sec": 2.469000207553546e-05
   },
   "vibration_dynamics": {
     "rms_g": 0.012575639894255856,
@@ -35,6 +35,6 @@
     "composite_health_score": 95.0,
     "health_verdict": "EXCELLENT / NOMINAL",
     "primary_mechanical_fault": "RPM UNAVAILABLE (NO TACHOMETER SIGNAL)",
-    "acoustic_direction_deg": 9.09027692082233
+    "acoustic_direction_deg": -2.2079003808431277
   }
 }

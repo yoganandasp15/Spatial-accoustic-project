@@ -57,7 +57,7 @@ class TestMultimodalPipeline(unittest.TestCase):
         sig_delayed = np.fft.irfft(fft_delayed, n=N_fft)
         
         # Compute GCC-PHAT delay
-        est_tau, cc, lags = gcc_phat(sig_filtered, sig_delayed, fs, max_tau=0.005, interp=32)
+        est_tau, cc, lags = gcc_phat(sig_delayed, sig_filtered, fs, max_tau=0.005, interp=32)
         
         error_us = abs(est_tau - true_tau) * 1e6
         print(f"\n[TEST] GCC-PHAT True Delay: {true_tau*1e6:.2f} μs | Est: {est_tau*1e6:.2f} μs | Error: {error_us:.3f} μs")

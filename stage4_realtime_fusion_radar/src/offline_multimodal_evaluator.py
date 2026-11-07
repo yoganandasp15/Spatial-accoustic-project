@@ -411,7 +411,7 @@ def run_full_offline_evaluation(wav_path: str, csv_path: str, out_dir: str) -> d
                     if "inter_pair_comp_delay_sec" in c_data:
                         comp_delay_sec = float(c_data["inter_pair_comp_delay_sec"])
                     elif "inter_pair_mean_skew_us" in c_data:
-                        comp_delay_sec = -float(c_data["inter_pair_mean_skew_us"]) * 1e-6
+                        comp_delay_sec = float(c_data["inter_pair_mean_skew_us"]) * 1e-6
                     elif "integer_sample_compensation" in c_data:
                         calib_fs = float(c_data.get("sample_rate_hz", fs))
                         comp_delay_sec = float(c_data["integer_sample_compensation"]) / calib_fs
