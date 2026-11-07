@@ -1,8 +1,9 @@
 @echo off
 setlocal
 echo =====================================================================
-echo  SPATIAL MULTIMODAL EDGE-AI -- AUTOMATED TEST SUITE
-echo  Validating GCC-PHAT, SRP-PHAT, ISO 10816, and Order Tracking
+echo  SPATIAL MULTIMODAL EDGE-AI -- AUTOMATED TEST SUITE (MILESTONE 3 / R4)
+echo  Validating GCC-PHAT, SRP-PHAT, Phase Compensation, Dynamic Vibration,
+echo  16-bit XOR Checksum, and Rotational Order Tracking
 echo =====================================================================
 echo(
 
