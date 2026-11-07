@@ -20,6 +20,8 @@ Features:
 =============================================================================
 """
 
+import collections
+import json
 import math
 import os
 import struct
@@ -64,6 +66,35 @@ FREQ_MAX = 5500.0
 # Frame & Animation Timing
 UPDATE_INTERVAL_MS = 50     # 20 FPS GUI refresh
 HEATMAP_SMOOTH_ALPHA = 0.30  # Surface temporal smoothing
+
+
+def apply_pair_phase_compensation(
+    audio_4ch: np.ndarray,
+    fs: float,
+    comp_delay_sec: float
+) -> np.ndarray:
+    """
+    Applies exact frequency-domain fractional delay phase compensation to Pair B (channels 2 & 3):
+    H(f) = exp(-j * 2 * pi * f * comp_delay_sec)
+    """
+    if abs(comp_delay_sec) < 1e-12 or audio_4ch.shape[1] < 4:
+        return audio_4ch.copy()
+        
+    n_samples, n_channels = audio_4ch.shape
+    n_pad = 128
+    n_fft = n_samples + n_pad
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / fs)
+    phase_shift = np.exp(-2j * np.pi * freqs * comp_delay_sec)
+    
+    aligned = audio_4ch.copy()
+    for ch in [2, 3]:
+        if ch < n_channels:
+            padded = np.pad(audio_4ch[:, ch], (0, n_pad), mode="constant")
+            ch_fft = np.fft.rfft(padded, n=n_fft)
+            compensated = np.fft.irfft(ch_fft * phase_shift, n=n_fft)
+            aligned[:, ch] = compensated[:n_samples]
+            
+    return aligned
 
 
 # =============================================================================
@@ -620,6 +651,7 @@ class MultimodalMotorEngine:
         self.grav_y = 0.0
         self.grav_z = -0.82
         self.vib_history: List[float] = []
+        self.vib_signed_history = collections.deque(maxlen=512)
 
     def learn_baseline(self, rpm: float, vib_g: float, audio: np.ndarray, fs: float):
         """Captures golden baseline signature of a known-healthy motor."""
@@ -650,7 +682,16 @@ class MultimodalMotorEngine:
         self.b_spec = None
         print("[+] Motor Baseline Reset.")
 
-    def analyze(self, audio: np.ndarray, fs: float, ax_g: float, ay_g: float, az_g: float, rpm: float) -> Dict[str, object]:
+    def analyze(
+        self,
+        audio: np.ndarray,
+        fs: float,
+        ax_g: float,
+        ay_g: float,
+        az_g: float,
+        rpm: float,
+        vib_history: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = None
+    ) -> Dict[str, object]:
         """Cross-fuses all 3 sensors to diagnose motor condition & compute Health Index."""
         x = audio.mean(axis=1).astype(np.float64) if audio.ndim > 1 else audio.astype(np.float64)
         x -= np.mean(x)
@@ -666,22 +707,48 @@ class MultimodalMotorEngine:
         rpm_jitter = float(np.std(self.rpm_history)) if len(self.rpm_history) > 3 else 0.0
 
         # 1. Decoupled Dynamic Vibration Magnitude (Per-Axis Gravity DC Removal)
-        # Slow EMA tracks static orientation/gravity vector (~0.5s time constant)
-        self.grav_x = 0.95 * self.grav_x + 0.05 * ax_g
-        self.grav_y = 0.95 * self.grav_y + 0.05 * ay_g
-        self.grav_z = 0.95 * self.grav_z + 0.05 * az_g
+        if vib_history is not None and len(vib_history[1]) >= 16:
+            t_vib, ax_arr, ay_arr, az_arr = vib_history
+            # Slow EMA tracks static orientation/gravity vector from batch average
+            self.grav_x = 0.90 * self.grav_x + 0.10 * float(np.mean(ax_arr))
+            self.grav_y = 0.90 * self.grav_y + 0.10 * float(np.mean(ay_arr))
+            self.grav_z = 0.90 * self.grav_z + 0.10 * float(np.mean(az_arr))
 
-        # AC dynamic acceleration components (free of static 1g gravity offset)
-        dyn_ax = ax_g - self.grav_x
-        dyn_ay = ay_g - self.grav_y
-        dyn_az = az_g - self.grav_z
+            # Signed dynamic acceleration components (free of static 1g gravity offset)
+            dyn_ax_arr = ax_arr - self.grav_x
+            dyn_ay_arr = ay_arr - self.grav_y
+            dyn_az_arr = az_arr - self.grav_z
 
-        dyn_g = math.sqrt(dyn_ax**2 + dyn_ay**2 + dyn_az**2)
-        self.vib_history.append(dyn_g)
-        if len(self.vib_history) > 256:
-            self.vib_history.pop(0)
+            # Signed dynamic vibration on primary radial/transverse axis for order tracking
+            signed_vib_series = dyn_ax_arr
+            dyn_mag_arr = np.sqrt(dyn_ax_arr**2 + dyn_ay_arr**2 + dyn_az_arr**2)
+            dyn_g = float(dyn_mag_arr[-1])
 
-        # Vibration severity grading (Project-defined empirical index inspired by ISO vibration zones)
+            # Effective vibration sampling rate from hardware timestamps
+            dt_span = float(t_vib[-1] - t_vib[0])
+            if dt_span > 1e-4 and len(t_vib) > 1:
+                fs_vib = float(len(t_vib) - 1) / dt_span
+            else:
+                fs_vib = 86.13
+        else:
+            self.grav_x = 0.95 * self.grav_x + 0.05 * ax_g
+            self.grav_y = 0.95 * self.grav_y + 0.05 * ay_g
+            self.grav_z = 0.95 * self.grav_z + 0.05 * az_g
+
+            dyn_ax = ax_g - self.grav_x
+            dyn_ay = ay_g - self.grav_y
+            dyn_az = az_g - self.grav_z
+
+            dyn_g = math.sqrt(dyn_ax**2 + dyn_ay**2 + dyn_az**2)
+            self.vib_history.append(dyn_g)
+            self.vib_signed_history.append(dyn_ax)
+            if len(self.vib_history) > 256:
+                self.vib_history.pop(0)
+
+            signed_vib_series = np.array(self.vib_signed_history, dtype=np.float64)
+            fs_vib = 86.13
+
+        # Vibration severity grading (Project Dynamic Vibration Severity Index inspired by ISO vibration zones)
         if dyn_g < 0.15:
             iso_severity = "ZONE A: GOOD / NOMINAL (Severity Index)"
             iso_color = "#00ffcc"
@@ -699,16 +766,14 @@ class MultimodalMotorEngine:
             iso_color = "#ff0055"
             vib_penalty = 50.0 + min(35.0, (dyn_g - 0.70) * 40.0)
 
-        # 2. Rotational Order Analysis from VIBRATION Time-Series (NOT Audio!)
-        # Using vibration buffer sampled at ~86.1 Hz with zero-padding for fine resolution (<0.1 Hz)
+        # 2. Rotational Order Analysis from SIGNED Dynamic Vibration (NOT Rectified Euclidean Magnitude!)
         f0 = max(1.0, rpm / 60.0)
-        if len(self.vib_history) >= 32 and rpm > 60.0:
-            vib_arr = np.array(self.vib_history, dtype=np.float64)
+        if len(signed_vib_series) >= 32 and rpm > 60.0:
+            vib_arr = np.array(signed_vib_series, dtype=np.float64)
             vib_arr -= np.mean(vib_arr)
-            fs_vib = 86.13  # Effective rate from 11025 / 128
             n_fft = max(256, len(vib_arr) * 4)  # Zero-padding for ~0.08 Hz bin spacing
             vib_spec = np.abs(np.fft.rfft(vib_arr, n=n_fft))
-            vib_freqs = np.fft.rfftfreq(n_fft, d=1.0/fs_vib)
+            vib_freqs = np.fft.rfftfreq(n_fft, d=1.0 / fs_vib)
 
             def get_order_energy(target_f, bandwidth=1.5):
                 mask = (vib_freqs >= max(0.5, target_f - bandwidth)) & (vib_freqs <= target_f + bandwidth)
@@ -805,6 +870,8 @@ class AudioSourceBase:
     def get_fs(self) -> float: raise NotImplementedError
     def get_channels(self) -> int: return 4
     def get_multimodal_telemetry(self) -> Dict[str, object]: return {}
+    def get_vibration_history(self, max_samples: int = 512) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        return np.array([]), np.array([]), np.array([]), np.array([])
 
 
 class ESP32MultimodalSource(AudioSourceBase):
@@ -827,6 +894,14 @@ class ESP32MultimodalSource(AudioSourceBase):
         self.dropped_packets = 0
         self.last_seq: Optional[int] = None
         self.last_packet_time = 0.0
+
+        # Thread-safe ring buffer for decoupling accelerometer acquisition from GUI thread
+        self.vib_ring_lock = threading.Lock()
+        self.vib_ring_time = collections.deque(maxlen=2048)
+        self.vib_ring_ax = collections.deque(maxlen=2048)
+        self.vib_ring_ay = collections.deque(maxlen=2048)
+        self.vib_ring_az = collections.deque(maxlen=2048)
+
         self.telemetry = {
             "ax_g": 0.0, "ay_g": -0.02, "az_g": -0.82,
             "rpm_pulses": 0, "estimated_rpm": 0.0,
@@ -846,6 +921,21 @@ class ESP32MultimodalSource(AudioSourceBase):
         self.ser: Optional[serial.Serial] = None
         self.last_pulse_count = 0
         self.last_pulse_time = time.time()
+
+    def get_vibration_history(self, max_samples: int = 512) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        with self.vib_ring_lock:
+            if len(self.vib_ring_ax) == 0:
+                return np.array([]), np.array([]), np.array([]), np.array([])
+            ax = np.array(self.vib_ring_ax, dtype=np.float32)
+            ay = np.array(self.vib_ring_ay, dtype=np.float32)
+            az = np.array(self.vib_ring_az, dtype=np.float32)
+            t = np.array(self.vib_ring_time, dtype=np.float64)
+        if len(ax) > max_samples:
+            ax = ax[-max_samples:]
+            ay = ay[-max_samples:]
+            az = az[-max_samples:]
+            t = t[-max_samples:]
+        return t, ax, ay, az
 
     def _find_port(self) -> str:
         if not SERIAL_AVAILABLE:
@@ -978,6 +1068,14 @@ class ESP32MultimodalSource(AudioSourceBase):
                                         self.dropped_packets += drop
                             self.last_seq = seq
                             self.last_packet_time = time.time()
+
+                            # Buffer accelerometer sample into decoupled thread-safe ring buffer
+                            t_pkt = self.last_packet_time
+                            with self.vib_ring_lock:
+                                self.vib_ring_time.append(t_pkt)
+                                self.vib_ring_ax.append(float(ax_mg) / 1000.0)
+                                self.vib_ring_ay.append(float(ay_mg) / 1000.0)
+                                self.vib_ring_az.append(float(az_mg) / 1000.0)
 
                             raw_payload = payload_bytes
                             samples = np.frombuffer(raw_payload, dtype=np.int16).reshape((block_frames, channels)).astype(np.float32) / 32768.0
@@ -1123,6 +1221,16 @@ class Synthetic4ChSource(AudioSourceBase):
             "is_hardware_alive": True
         }
 
+    def get_vibration_history(self, max_samples: int = 512) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        t_now = time.time()
+        fs_sim = 400.0
+        n_samples = min(max_samples, 256)
+        t_arr = np.linspace(t_now - n_samples / fs_sim, t_now, n_samples)
+        vib_x = (0.12 * np.sin(2.0 * np.pi * 18.0 * t_arr)).astype(np.float32)
+        vib_y = (0.15 * np.cos(2.0 * np.pi * 18.0 * t_arr)).astype(np.float32)
+        vib_z = (-0.82 + 0.08 * np.sin(2.0 * np.pi * 36.0 * t_arr)).astype(np.float32)
+        return t_arr, vib_x, vib_y, vib_z
+
 
 class LaptopAudioSource(AudioSourceBase):
     """Ingests audio from laptop internal microphone array (2-channel or 4-channel)."""
@@ -1233,6 +1341,29 @@ class AcousticRadarApp:
         self.last_classifier_result = {
             "label": "CALIBRATING", "confidence": 0, "severity": "INITIALIZING", "detail": "Listening for acoustic sources..."
         }
+
+        # I2S Dual-Pair Phase Calibration Delay (Seconds)
+        self.calib_delay_sec = 0.0
+        proj_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        calib_candidates = [
+            os.path.join(proj_dir, "stage2_acoustic_localization", "evidence", "i2s_phase_calibration.json"),
+            os.path.join(proj_dir, "stage4_realtime_fusion_radar", "evidence", "i2s_phase_calibration.json"),
+            os.path.join(proj_dir, "evidence", "stage2", "i2s_phase_calibration.json"),
+            "i2s_phase_calibration.json"
+        ]
+        for c_path in calib_candidates:
+            if os.path.exists(c_path):
+                try:
+                    with open(c_path, 'r') as f:
+                        c_data = json.load(f)
+                        if "inter_pair_comp_delay_sec" in c_data:
+                            self.calib_delay_sec = float(c_data["inter_pair_comp_delay_sec"])
+                        elif "inter_pair_mean_skew_us" in c_data:
+                            self.calib_delay_sec = -float(c_data["inter_pair_mean_skew_us"]) * 1e-6
+                        print(f"[*] Acoustic Radar: Loaded Phase Calibration from {os.path.basename(c_path)}: Delay = {self.calib_delay_sec*1e6:+.2f} μs")
+                        break
+                except Exception as e:
+                    print(f"[!] Warning reading phase calibration from {c_path}: {e}")
 
         # Multimodal Motor Diagnostics Engine & Sensor Fusion
         self.motor_engine = MultimodalMotorEngine()
@@ -1580,6 +1711,10 @@ class AcousticRadarApp:
             if self.invert_channels:
                 raw_frame = np.fliplr(raw_frame)
 
+            # Apply I2S phase calibration compensation to Pair B (channels 2 & 3)
+            if abs(self.calib_delay_sec) > 1e-12 and raw_frame.shape[1] >= 4:
+                raw_frame = apply_pair_phase_compensation(raw_frame, fs, self.calib_delay_sec)
+
             # 1. Update 4-Channel Live Waveforms & VU Badges
             n_samples = min(raw_frame.shape[0], 512)
             x_axis = np.arange(n_samples)
@@ -1733,7 +1868,8 @@ class AcousticRadarApp:
                 self.motor_engine.learn_baseline(rpm, dyn_vib_g, raw_frame, fs)
                 self.learn_baseline_requested = False
 
-            motor_diag = self.motor_engine.analyze(raw_frame, fs, ax_g, ay_g, az_g, rpm)
+            vib_hist = self.current_source.get_vibration_history(max_samples=512)
+            motor_diag = self.motor_engine.analyze(raw_frame, fs, ax_g, ay_g, az_g, rpm, vib_history=vib_hist)
 
             dir_str = "CENTER" if abs(target_angle) < 6.0 else ("RIGHT" if target_angle > 0 else "LEFT")
             lock_badge = f"* LOCKED ({dir_str})" if is_locked else "SEARCHING / SCANNING..."

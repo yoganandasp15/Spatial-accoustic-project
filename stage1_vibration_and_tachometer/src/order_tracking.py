@@ -80,9 +80,12 @@ def compute_order_tracking(
         order_magnitude: Amplitude of order spectrum.
         metrics: Order energy fractions (1X, 2X, sub-synchronous, etc.).
     """
-    # Assign angle to each revolution marker: marker k is at angle 2 * pi * k
-    n_revs = len(rev_times)
-    rev_angles = np.arange(n_revs) * 2.0 * np.pi
+    # Assign angle to each revolution marker: N markers define N-1 intervals
+    n_markers = len(rev_times)
+    if n_markers < 2:
+        raise ValueError(f"Need at least 2 tachometer markers to define revolution intervals, got {n_markers}.")
+    n_intervals = n_markers - 1
+    rev_angles = np.arange(n_markers) * 2.0 * np.pi
     
     # Boundary trimming: only analyze vibration within [rev_times[0], rev_times[-1]]
     t_start = rev_times[0]
@@ -96,16 +99,16 @@ def compute_order_tracking(
         raise ValueError("Insufficient vibration samples within tachometer revolution interval.")
         
     # Adaptive samples per revolution for short bursts vs long records
-    measured_smp_per_rev = len(t_valid) / max(1, n_revs)
+    measured_smp_per_rev = len(t_valid) / max(1, n_intervals)
     if samples_per_rev > measured_smp_per_rev * 4:
         samples_per_rev = max(16, int(measured_smp_per_rev * 2))
         
     # Fit monotonic cubic spline to map time t -> angle theta
     time_to_angle = interpolate.PchipInterpolator(rev_times, rev_angles)
     
-    # Generate uniform angle grid: from angle 0 to total angle
+    # Generate uniform angle grid: across n_intervals complete revolutions (0 to n_intervals * 2 * pi)
     total_angle = rev_angles[-1]
-    total_resampled_points = int(n_revs * samples_per_rev)
+    total_resampled_points = int(n_intervals * samples_per_rev)
     theta_uniform = np.linspace(0.0, total_angle, total_resampled_points, endpoint=False)
     
     # Invert mapping: angle -> time using PchipInterpolator
@@ -149,9 +152,11 @@ def compute_order_tracking(
     rpm_jitter = float(np.std(instant_rpms))
     
     metrics = {
+        "status": "VALID",
         "mean_rpm": mean_rpm,
         "rpm_jitter": rpm_jitter,
-        "total_revolutions": n_revs,
+        "rpm_std": rpm_jitter,
+        "total_revolutions": n_intervals,
         "e_1x_pct": float(100.0 * e_1x / total_energy),
         "e_2x_pct": float(100.0 * e_2x / total_energy),
         "e_3x_pct": float(100.0 * e_3x / total_energy),
@@ -165,6 +170,10 @@ def compute_order_tracking(
     }
     
     return {
+        "status": "VALID",
+        "total_revolutions": n_intervals,
+        "mean_rpm": mean_rpm,
+        "rpm_jitter": rpm_jitter,
         "theta_uniform": theta_uniform,
         "vib_angle": vib_angle,
         "orders": orders,
@@ -288,24 +297,47 @@ def run_order_tracking_on_csv(csv_path: str, output_dir: str) -> dict:
     vibration = df[vib_col].values.astype(np.float64)
     
     # Tachometer signal: check if dedicated tach column exists
+    rev_times = None
     if "tachometer" in col_map or "tach" in col_map:
         tach_col = col_map.get("tachometer", col_map.get("tach"))
         tach_signal = df[tach_col].values
-        rev_times = extract_tachometer_revolutions(t, tach_signal)
+        try:
+            rev_times = extract_tachometer_revolutions(t, tach_signal)
+        except ValueError as e:
+            print(f"[!] Tachometer extraction notice: {e}")
+            rev_times = None
     elif "pulse_count" in col_map:
         # Pulses logged directly
         pulse_diff = np.diff(df[col_map["pulse_count"]].values)
         edge_indices = np.where(pulse_diff > 0)[0]
         if len(edge_indices) >= 2:
             rev_times = t[edge_indices]
-        else:
-            # Nominal 25 Hz shaft rotation (1500 RPM)
-            rev_period = 1.0 / 25.0
-            rev_times = np.arange(t[0], t[-1], rev_period)
-    else:
-        # Nominal 25 Hz shaft rotation (1500 RPM)
-        rev_period = 1.0 / 25.0
-        rev_times = np.arange(t[0], t[-1], rev_period)
+
+    if rev_times is None or len(rev_times) < 2:
+        print("[!] WARNING: Tachometer signal absent or insufficient pulse edges (<2). Shaft RPM is unavailable.")
+        metrics = {
+            "status": "UNAVAILABLE",
+            "mean_rpm": 0.0,
+            "rpm_jitter": 0.0,
+            "rpm_std": 0.0,
+            "total_revolutions": 0,
+            "e_1x_pct": 0.0,
+            "e_2x_pct": 0.0,
+            "e_3x_pct": 0.0,
+            "e_sub_pct": 0.0,
+            "e_harmonics_pct": 0.0,
+            "primary_order_fault": "RPM UNAVAILABLE (NO TACHOMETER SIGNAL)"
+        }
+        output_json = os.path.join(output_dir, "order_tracking_metrics.json")
+        with open(output_json, 'w') as f:
+            json.dump(metrics, f, indent=2)
+        print(f"[+] Order metrics JSON saved: {output_json}")
+        print("\n" + "="*75)
+        print(" ROTATIONAL ORDER TRACKING REPORT: RPM UNAVAILABLE (NO TACHOMETER SIGNAL)")
+        print("   Shaft Speed     : UNAVAILABLE")
+        print("   Order Tracking  : SKIPPED (Requires valid optical tachometer marker pulses)")
+        print("="*75)
+        return metrics
         
     ot_res = compute_order_tracking(t, vibration, rev_times, samples_per_rev=256)
     

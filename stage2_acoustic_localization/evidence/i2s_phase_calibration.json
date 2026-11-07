@@ -2,10 +2,13 @@
   "audio_file": "multimodal_4mic_audio.wav",
   "sample_rate_hz": 44100,
   "incident_angle_deg": 0.0,
-  "inter_pair_mean_skew_us": -24.69000207553575,
-  "inter_pair_mean_skew_samples": -1.0888290915311267,
+  "inter_pair_mean_skew_us": 24.69000207553546,
+  "inter_pair_mean_skew_samples": 1.0888290915311138,
+  "inter_pair_comp_delay_sec": -2.469000207553546e-05,
+  "integer_sample_compensation_at_calib_fs": -1,
+  "fractional_sample_compensation_at_calib_fs": -0.08882909153111362,
   "integer_sample_compensation": -1,
-  "fractional_sample_compensation": -0.08882909153112672,
+  "fractional_sample_compensation": -0.08882909153111362,
   "is_sync_healthy": false,
   "status_diagnosis": "SKEWED (Inter-pair DMA delay detected)",
   "pair_details": [
@@ -16,9 +19,9 @@
       ],
       "label": "Intra-Pair A (Mic1-Mic2, I2S0)",
       "theo_tau_us": 0.0,
-      "meas_tau_us": 0.8354697231453847,
-      "skew_us": 0.8354697231453847,
-      "skew_samples": 0.03684421479071146
+      "meas_tau_us": -0.8354697231453847,
+      "skew_us": -0.8354697231453847,
+      "skew_samples": -0.03684421479071146
     },
     {
       "pair": [
@@ -27,9 +30,9 @@
       ],
       "label": "Intra-Pair B (Mic3-Mic4, I2S1)",
       "theo_tau_us": 0.0,
-      "meas_tau_us": 1.1034862291863177,
-      "skew_us": 1.1034862291863177,
-      "skew_samples": 0.048663742707116604
+      "meas_tau_us": -1.10348622918431,
+      "skew_us": -1.10348622918431,
+      "skew_samples": -0.04866374270702807
     },
     {
       "pair": [
@@ -38,9 +41,9 @@
       ],
       "label": "Inter-Pair Center (Mic2-Mic3, I2S0 vs I2S1)",
       "theo_tau_us": 0.0,
-      "meas_tau_us": -6.2474342763331565,
-      "skew_us": -6.2474342763331565,
-      "skew_samples": -0.2755118515862922
+      "meas_tau_us": 6.247434276334663,
+      "skew_us": 6.247434276334663,
+      "skew_samples": 0.2755118515863586
     },
     {
       "pair": [
@@ -49,9 +52,9 @@
       ],
       "label": "Inter-Pair Outer (Mic1-Mic4, I2S0 vs I2S1)",
       "theo_tau_us": 0.0,
-      "meas_tau_us": -45.372172859866446,
-      "skew_us": -45.372172859866446,
-      "skew_samples": -2.0009128231201103
+      "meas_tau_us": 45.37217285986503,
+      "skew_us": 45.37217285986503,
+      "skew_samples": 2.0009128231200477
     },
     {
       "pair": [
@@ -60,9 +63,9 @@
       ],
       "label": "Cross-Pair 1-3 (I2S0 vs I2S1)",
       "theo_tau_us": 0.0,
-      "meas_tau_us": -37.30420734767862,
-      "skew_us": -37.30420734767862,
-      "skew_samples": -1.645115544032627
+      "meas_tau_us": 37.30420734767495,
+      "skew_us": 37.30420734767495,
+      "skew_samples": 1.6451155440324652
     },
     {
       "pair": [
@@ -71,9 +74,9 @@
       ],
       "label": "Cross-Pair 2-4 (I2S0 vs I2S1)",
       "theo_tau_us": 0.0,
-      "meas_tau_us": -9.836193818264789,
-      "skew_us": -9.836193818264789,
-      "skew_samples": -0.4337761473854772
+      "meas_tau_us": 9.836193818267203,
+      "skew_us": 9.836193818267203,
+      "skew_samples": 0.4337761473855837
     }
   ]
 }

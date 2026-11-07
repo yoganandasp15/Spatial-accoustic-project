@@ -83,8 +83,9 @@ def gcc_phat(sig1: np.ndarray, sig2: np.ndarray, fs: float, max_tau: float = Non
     X1 = np.fft.rfft(s1, n=n)
     X2 = np.fft.rfft(s2, n=n)
     
-    # R = X2 * conj(X1) so positive delay corresponds to sig2 delayed relative to sig1
-    R = X2 * np.conj(X1)
+    # Standard convention across localization modules: R = X1 * conj(X2)
+    # Positive delay corresponds to sig1 delayed relative to sig2 (sound reached mic 2 before mic 1)
+    R = X1 * np.conj(X2)
     denom = np.abs(R)
     denom = np.maximum(denom, 1e-4 * np.max(denom))
     R_phat = np.where(denom > 1e-15, R / denom, 0.0)
@@ -217,9 +218,10 @@ def audit_dual_i2s_phase(wav_path: str, output_dir: str, sound_incident_angle_de
     
     mean_inter_pair_skew_samples = float(np.mean(skew_inter_pair_samples))
     mean_inter_pair_skew_us = mean_inter_pair_skew_samples / fs * 1e6
+    comp_delay_sec = -mean_inter_pair_skew_us * 1e-6
     
     # Assess synchronization status
-    # Tolerable threshold: < 0.5 sample error at sample rate
+    # Tolerable threshold: < 0.75 sample error at calibration sample rate
     is_sync_healthy = abs(mean_inter_pair_skew_samples) < 0.75
     
     calibration_data = {
@@ -228,8 +230,11 @@ def audit_dual_i2s_phase(wav_path: str, output_dir: str, sound_incident_angle_de
         "incident_angle_deg": sound_incident_angle_deg,
         "inter_pair_mean_skew_us": mean_inter_pair_skew_us,
         "inter_pair_mean_skew_samples": mean_inter_pair_skew_samples,
-        "integer_sample_compensation": int(np.round(mean_inter_pair_skew_samples)),
-        "fractional_sample_compensation": float(mean_inter_pair_skew_samples - np.round(mean_inter_pair_skew_samples)),
+        "inter_pair_comp_delay_sec": comp_delay_sec,
+        "integer_sample_compensation_at_calib_fs": int(np.round(comp_delay_sec * fs)),
+        "fractional_sample_compensation_at_calib_fs": float(comp_delay_sec * fs - np.round(comp_delay_sec * fs)),
+        "integer_sample_compensation": int(np.round(comp_delay_sec * fs)),
+        "fractional_sample_compensation": float(comp_delay_sec * fs - np.round(comp_delay_sec * fs)),
         "is_sync_healthy": is_sync_healthy,
         "status_diagnosis": "LOCKED (Clocks aligned within <1 sample)" if is_sync_healthy else "SKEWED (Inter-pair DMA delay detected)",
         "pair_details": results
@@ -242,8 +247,9 @@ def audit_dual_i2s_phase(wav_path: str, output_dir: str, sound_incident_angle_de
     
     print("\n" + "="*85)
     print(f" DUAL-I2S SYNCHRONIZATION DIAGNOSIS: {calibration_data['status_diagnosis']}")
-    print(f" Inter-Pair DMA Mean Skew: {mean_inter_pair_skew_us:+.2f} μs ({mean_inter_pair_skew_samples:+.2f} samples)")
-    print(f" Recommended Compensation: Shift Pair B by {-calibration_data['integer_sample_compensation']} integer samples")
+    print(f" Inter-Pair DMA Mean Skew: {mean_inter_pair_skew_us:+.2f} μs ({mean_inter_pair_skew_samples:+.2f} samples at {fs:.0f} Hz)")
+    print(f" Physical Compensation Delay: {comp_delay_sec*1e6:+.2f} μs ({calibration_data['integer_sample_compensation_at_calib_fs']:+d} integer samples at {fs:.0f} Hz)")
+    print(f" Recommended Compensation: Apply H(f) = exp(-j * 2 * pi * f * {comp_delay_sec:.6e}) to Pair B (channels 2 & 3)")
     print("="*85)
     
     return calibration_data
