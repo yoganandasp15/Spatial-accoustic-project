@@ -37,3 +37,6 @@ $RECYCLE.BIN/
 .idea/
 *.sublime-project
 *.sublime-workspace
+
+# Explicit inclusions
+!AGENTS.md
