@@ -104,12 +104,22 @@ def generate_source_signal(n_samples: int, fs: float, motor_rpm: float = 2400.0)
     return sig
 
 def fractional_delay(sig: np.ndarray, delay_sec: float, fs: float) -> np.ndarray:
-    """Applies exact bandlimited fractional sample delay in frequency domain."""
-    n = len(sig)
-    freqs = np.fft.rfftfreq(n, d=1.0 / fs)
+    """
+    Applies exact bandlimited fractional sample delay in frequency domain with
+    zero-padding to eliminate circular wraparound edge effects.
+    """
+    n_orig = len(sig)
+    delay_samples = int(np.ceil(abs(delay_sec) * fs)) + 64
+    pad_len = max(128, delay_samples * 2)
+
+    padded_sig = np.pad(sig, (pad_len, pad_len), mode="constant")
+    n_padded = len(padded_sig)
+
+    freqs = np.fft.rfftfreq(n_padded, d=1.0 / fs)
     phase_shift = np.exp(-2j * np.pi * freqs * delay_sec)
-    sig_delayed = irfft(rfft(sig) * phase_shift, n=n)
-    return sig_delayed
+    delayed_padded = irfft(rfft(padded_sig) * phase_shift, n=n_padded)
+
+    return delayed_padded[pad_len : pad_len + n_orig]
 
 def simulate_array_signals(
     src_pos: np.ndarray,

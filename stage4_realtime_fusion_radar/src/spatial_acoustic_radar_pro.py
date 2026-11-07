@@ -446,11 +446,10 @@ class SRPPhatEngine:
         dist_weight = 1.0 / np.sqrt(np.maximum(r_grid, 0.40))
         dist_weight /= np.max(dist_weight)
 
-        if is_locked and target_range_m > 0.3:
-            focal_ring = np.exp(-0.5 * ((r_grid - target_range_m) / 0.85) ** 2)
-            spatial_filter = 0.65 * dist_weight + 0.35 * focal_ring
-        else:
-            spatial_filter = dist_weight
+        # Removed artificial radial focal ring (nominal_range = 1.25m prior).
+        # Linear array naturally constrains azimuth bearing theta;
+        # radial dimension reflects true backprojected energy with spherical divergence weighting.
+        spatial_filter = dist_weight
 
         filtered_heat = raw_2d_heatmap * spatial_filter
         max_heat = np.max(filtered_heat)
@@ -616,6 +615,12 @@ class MultimodalMotorEngine:
         self.b_time = 0.0
         self.rpm_history: List[float] = []
 
+        # Per-axis gravity tracking & vibration time series buffer
+        self.grav_x = 0.0
+        self.grav_y = 0.0
+        self.grav_z = -0.82
+        self.vib_history: List[float] = []
+
     def learn_baseline(self, rpm: float, vib_g: float, audio: np.ndarray, fs: float):
         """Captures golden baseline signature of a known-healthy motor."""
         x = audio.mean(axis=1).astype(np.float64) if audio.ndim > 1 else audio.astype(np.float64)
@@ -660,42 +665,66 @@ class MultimodalMotorEngine:
             self.rpm_history.pop(0)
         rpm_jitter = float(np.std(self.rpm_history)) if len(self.rpm_history) > 3 else 0.0
 
-        # 1. Dynamic Vibration Severity Index (Empirical zones inspired by ISO 10816 Class 1)
-        # Note: Strict ISO 10816-1 requires vibration velocity RMS (v_rms in mm/s).
-        # Dynamic acceleration magnitude (dyn_g = |total_g - 1.0g| in g) is used as an edge proxy.
-        total_g = math.sqrt(ax_g**2 + ay_g**2 + az_g**2)
-        dyn_g = max(0.0, total_g - 1.0) # Subtract 1g static gravity
+        # 1. Decoupled Dynamic Vibration Magnitude (Per-Axis Gravity DC Removal)
+        # Slow EMA tracks static orientation/gravity vector (~0.5s time constant)
+        self.grav_x = 0.95 * self.grav_x + 0.05 * ax_g
+        self.grav_y = 0.95 * self.grav_y + 0.05 * ay_g
+        self.grav_z = 0.95 * self.grav_z + 0.05 * az_g
 
+        # AC dynamic acceleration components (free of static 1g gravity offset)
+        dyn_ax = ax_g - self.grav_x
+        dyn_ay = ay_g - self.grav_y
+        dyn_az = az_g - self.grav_z
+
+        dyn_g = math.sqrt(dyn_ax**2 + dyn_ay**2 + dyn_az**2)
+        self.vib_history.append(dyn_g)
+        if len(self.vib_history) > 256:
+            self.vib_history.pop(0)
+
+        # Vibration severity grading (Project-defined empirical index inspired by ISO vibration zones)
         if dyn_g < 0.15:
-            iso_severity = "ZONE A: GOOD / NOMINAL (ISO-Inspired)"
+            iso_severity = "ZONE A: GOOD / NOMINAL (Severity Index)"
             iso_color = "#00ffcc"
             vib_penalty = dyn_g / 0.15 * 5.0
         elif dyn_g < 0.35:
-            iso_severity = "ZONE B: PERMISSIBLE (ISO-Inspired)"
+            iso_severity = "ZONE B: PERMISSIBLE (Severity Index)"
             iso_color = "#33ccff"
             vib_penalty = 5.0 + (dyn_g - 0.15) / 0.20 * 15.0
         elif dyn_g < 0.70:
-            iso_severity = "ZONE C: WARNING (ISO-Inspired)"
+            iso_severity = "ZONE C: WARNING (Severity Index)"
             iso_color = "#ffaa00"
             vib_penalty = 20.0 + (dyn_g - 0.35) / 0.35 * 30.0
         else:
-            iso_severity = "ZONE D: UNACCEPTABLE / ALARM (ISO-Inspired)"
+            iso_severity = "ZONE D: UNACCEPTABLE (Severity Index)"
             iso_color = "#ff0055"
             vib_penalty = 50.0 + min(35.0, (dyn_g - 0.70) * 40.0)
 
-        # 2. Acoustic Spectral & Harmonic Order Analysis
-        spec = np.abs(np.fft.rfft(x))
-        freqs = np.fft.rfftfreq(len(x), d=1.0/fs)
+        # 2. Rotational Order Analysis from VIBRATION Time-Series (NOT Audio!)
+        # Using vibration buffer sampled at ~86.1 Hz with zero-padding for fine resolution (<0.1 Hz)
         f0 = max(1.0, rpm / 60.0)
+        if len(self.vib_history) >= 32 and rpm > 60.0:
+            vib_arr = np.array(self.vib_history, dtype=np.float64)
+            vib_arr -= np.mean(vib_arr)
+            fs_vib = 86.13  # Effective rate from 11025 / 128
+            n_fft = max(256, len(vib_arr) * 4)  # Zero-padding for ~0.08 Hz bin spacing
+            vib_spec = np.abs(np.fft.rfft(vib_arr, n=n_fft))
+            vib_freqs = np.fft.rfftfreq(n_fft, d=1.0/fs_vib)
 
-        def get_order_energy(target_f, bandwidth=8.0):
-            mask = (freqs >= max(10.0, target_f - bandwidth)) & (freqs <= target_f + bandwidth)
-            return float(np.sum(spec[mask]**2)) if np.any(mask) else 0.0
+            def get_order_energy(target_f, bandwidth=1.5):
+                mask = (vib_freqs >= max(0.5, target_f - bandwidth)) & (vib_freqs <= target_f + bandwidth)
+                return float(np.sum(vib_spec[mask]**2)) if np.any(mask) else 0.0
 
-        tot_energy = float(np.sum(spec**2)) + 1e-15
-        e_1x = get_order_energy(f0) / tot_energy
-        e_2x = get_order_energy(2.0 * f0) / tot_energy
-        e_3x = get_order_energy(3.0 * f0) / tot_energy
+            tot_vib_energy = float(np.sum(vib_spec**2)) + 1e-15
+            e_1x = get_order_energy(f0) / tot_vib_energy
+            e_2x = get_order_energy(2.0 * f0) / tot_vib_energy
+            e_3x = get_order_energy(3.0 * f0) / tot_vib_energy
+        else:
+            e_1x = 0.0
+            e_2x = 0.0
+            e_3x = 0.0
+
+        # Acoustic spectrum for high-frequency acoustic baseline comparison
+        spec = np.abs(np.fft.rfft(x))
 
         # 3. Fault Classification Diagnostics
         fault_label = "NOMINAL / SMOOTH OPERATION"
@@ -793,13 +822,23 @@ class ESP32MultimodalSource(AudioSourceBase):
         self.frame_len = 512
 
         self.buffer = np.zeros((self.frame_len, self.channels), dtype=np.float32)
+        self.packets_valid = 0
+        self.checksum_errors = 0
+        self.dropped_packets = 0
+        self.last_seq: Optional[int] = None
+        self.last_packet_time = 0.0
         self.telemetry = {
             "ax_g": 0.0, "ay_g": -0.02, "az_g": -0.82,
             "rpm_pulses": 0, "estimated_rpm": 0.0,
             "firmware_mode": "CONNECTING...",
             "rms_counts": [0.0, 0.0, 0.0, 0.0],
             "peak_counts": [0, 0, 0, 0],
-            "is_hardware_alive": False
+            "is_hardware_alive": False,
+            "packets_valid": 0,
+            "checksum_errors": 0,
+            "dropped_packets": 0,
+            "channels_active": 0,
+            "last_packet_time": 0.0
         }
         self.lock = threading.Lock()
         self.running = False
@@ -912,8 +951,39 @@ class ESP32MultimodalSource(AudioSourceBase):
                             if len(buf) < total_pkt_len:
                                 break
 
-                            raw_payload = buf[HEADER_SIZE : HEADER_SIZE + payload_len]
+                            # 16-bit XOR Checksum Validation
+                            expected_chk = struct.unpack_from("<H", buf, HEADER_SIZE + payload_len)[0]
+                            hdr_bytes = bytes(buf[0 : HEADER_SIZE])
+                            payload_bytes = bytes(buf[HEADER_SIZE : HEADER_SIZE + payload_len])
+
+                            chk = 0x55AA
+                            for i, b in enumerate(hdr_bytes):
+                                chk ^= ((b << (i % 8)) & 0xFFFF)
+                            for i, b in enumerate(payload_bytes):
+                                chk ^= ((b << (i % 8)) & 0xFFFF)
+
+                            if (chk & 0xFFFF) != (expected_chk & 0xFFFF):
+                                self.checksum_errors += 1
+                                # Discard current sync byte to search for next valid frame
+                                del buf[:2]
+                                continue
+
+                            # Packet Valid! Update sequence and tracking
+                            self.packets_valid += 1
+                            if self.last_seq is not None:
+                                expected_seq = (self.last_seq + 1) & 0xFFFF
+                                if seq != expected_seq:
+                                    drop = (seq - expected_seq) & 0xFFFF
+                                    if drop < 500:
+                                        self.dropped_packets += drop
+                            self.last_seq = seq
+                            self.last_packet_time = time.time()
+
+                            raw_payload = payload_bytes
                             samples = np.frombuffer(raw_payload, dtype=np.int16).reshape((block_frames, channels)).astype(np.float32) / 32768.0
+
+                            rms_ch = [float(np.sqrt(np.mean(samples[:, i].astype(np.float64)**2))) for i in range(channels)]
+                            active_channels = sum(1 for r in rms_ch if r > 0.0003)
 
                             with self.lock:
                                 self.buffer = np.roll(self.buffer, -block_frames, axis=0)
@@ -937,7 +1007,12 @@ class ESP32MultimodalSource(AudioSourceBase):
                                     "rpm_pulses": pulses,
                                     "firmware_mode": f"4-CH REAL-TIME PCM DMA STREAM ({target_port} @ {self.ser.baudrate})",
                                     "is_hardware_alive": True,
-                                    "rms_counts": [float(np.sqrt(np.mean(samples[:, i].astype(np.float64)**2)) * 32768.0) for i in range(channels)],
+                                    "packets_valid": self.packets_valid,
+                                    "checksum_errors": self.checksum_errors,
+                                    "dropped_packets": self.dropped_packets,
+                                    "channels_active": active_channels,
+                                    "last_packet_time": self.last_packet_time,
+                                    "rms_counts": [float(r * 32768.0) for r in rms_ch],
                                     "peak_counts": [int(np.max(np.abs(samples[:, i])) * 32768.0) for i in range(channels)]
                                 })
 
@@ -1172,14 +1247,25 @@ class AcousticRadarApp:
         """Returns clear evidence mode tag distinguishing physical hardware from simulation."""
         if self.active_source_type == "ESP32":
             telemetry = self.current_source.get_multimodal_telemetry()
-            if telemetry.get("is_hardware_alive", False):
-                return "MODE: LIVE 4-MIC ULA PHYSICAL HARDWARE (COM8)"
+            is_alive = telemetry.get("is_hardware_alive", False)
+            pkt_valid = telemetry.get("packets_valid", 0)
+            chk_err = telemetry.get("checksum_errors", 0)
+            ch_active = telemetry.get("channels_active", 0)
+            last_pkt = telemetry.get("last_packet_time", 0.0)
+
+            if is_alive and (time.time() - last_pkt < 1.5) and pkt_valid > 5:
+                if ch_active >= 4:
+                    return f"MODE: LIVE 4-MIC ULA HARDWARE (COM8, CHK VALIDATED) [{self.geometry.name}]"
+                else:
+                    return f"MODE: LIVE HARDWARE (COM8, {ch_active}/4 CH ACTIVE, CHK OK) [{self.geometry.name}]"
+            elif is_alive and chk_err > 0:
+                return f"MODE: HARDWARE WARNING ({chk_err} CHECKSUM ERRORS) [{self.geometry.name}]"
             else:
                 return "MODE: ESP32 STANDBY / DISCONNECTED"
         elif self.active_source_type == "SYNTHETIC":
-            return "MODE: SYNTHETIC 4-CH ARRAY SIMULATION"
+            return f"MODE: SYNTHETIC 4-CH ARRAY SIMULATION [{self.geometry.name}]"
         elif self.active_source_type == "LAPTOP":
-            return "MODE: LAPTOP INTERNAL MIC DEMO"
+            return f"MODE: LAPTOP INTERNAL MIC DEMO [{self.geometry.name}]"
         return f"MODE: {self.active_source_type}"
 
     def _setup_ui(self):
@@ -1700,15 +1786,16 @@ class AcousticRadarApp:
                 "------------------------------------------------------------------------------------------",
                 f" [S1: FC-03 TACH]     Speed: {rpm:6.1f} RPM (f0 = {motor_diag['f0_hz']:4.1f} Hz) | Jitter: ±{motor_diag['rpm_jitter']:3.1f} RPM",
                 f"                      Total: {pulses:6d} Pulses | PPR: {self.pulses_per_rev} (Key 'P' to cycle)",
-                f" [S2: ADXL345 3-AXIS] Vib: {dyn_vib_g:4.2f}g dyn (Tot: {total_g:4.2f}g) | [X:{ax_g:+5.2f}, Y:{ay_g:+5.2f}, Z:{az_g:+5.2f}]",
-                f"                      Vib Severity: {motor_diag['iso_severity']}",
-                f" [S3: 4-MIC ACOUSTIC] Kurtosis: {motor_diag['kurtosis']:4.2f} (Norm=3.0) | Crest Factor: {motor_diag['crest_factor']:4.1f}",
-                f"                      Orders: 1x(Unbal)={motor_diag['e_1x_pct']:4.1f}% | 2x(Misalign)={motor_diag['e_2x_pct']:4.1f}%",
+                f" [S2: ADXL345 3-AXIS] Dyn Vib: {dyn_vib_g:4.3f}g (Gravity-Decoupled) | Raw: [X:{ax_g:+5.2f}, Y:{ay_g:+5.2f}, Z:{az_g:+5.2f}]",
+                f"                      Severity Index: {motor_diag['iso_severity']}",
+                f" [S3: ACOUSTIC EMIT]  Kurtosis: {motor_diag['kurtosis']:4.2f} (Norm=3.0) | Crest Factor: {motor_diag['crest_factor']:4.1f}",
+                f" [S4: VIB HARMONICS]  1x(Unbalance)={motor_diag['e_1x_pct']:4.1f}% | 2x(Misalignment)={motor_diag['e_2x_pct']:4.1f}%",
                 "------------------------------------------------------------------------------------------",
-                f" [DIRECTIONAL RADAR]  Target: {target_angle:+6.1f}° [{dir_str:<6}] | Focus: {dom_tag} | Prom: {composite_prom:4.2f}",
+                f" [DIRECTIONAL RADAR]  Target: {target_angle:+6.1f}° [{dir_str:<6}] | Focus: {dom_tag} | Range: Unconstrained (DOA θ-Ray)",
                 f"   LEFT FLANK  : [{make_vu_bar(pct_l)}] {pct_l:4.1f}% ({db_l:+5.1f} dBFS) {'◄-- ACTIVE' if dom_s=='LEFT' and is_active_sound else ''}",
                 f"   FRONT CENTER: [{make_vu_bar(pct_c)}] {pct_c:4.1f}% ({db_c:+5.1f} dBFS) {'▲-- ACTIVE' if dom_s=='CENTER' and is_active_sound else ''}",
                 f"   RIGHT FLANK : [{make_vu_bar(pct_r)}] {pct_r:4.1f}% ({db_r:+5.1f} dBFS) {'ACTIVE --►' if dom_s=='RIGHT' and is_active_sound else ''}",
+                f" [SERIAL INTEGRITY]   Valid Pkts: {telemetry.get('packets_valid', 0)} | Drops: {telemetry.get('dropped_packets', 0)} | ChkErr: {telemetry.get('checksum_errors', 0)}",
                 f" [ARRAY APERTURE]     Spacing: {self.geometry.baseline_m * 1000.0:4.1f} mm | Span: {self.geometry.baseline_m * 3000.0:4.1f} mm | [{invert_badge}]",
                 f" [HARDWARE LINK]      Status: {hw_badge} | Mode: {fw_mode}",
                 "==========================================================================================",
@@ -1718,7 +1805,9 @@ class AcousticRadarApp:
             self.hud_text.set_text("\n".join(hud_lines))
 
         except Exception as e:
-            pass
+            if not hasattr(self, "_last_err_time") or time.time() - self._last_err_time > 3.0:
+                print(f"[!] Warning in GUI update loop: {e}", file=sys.stderr)
+                self._last_err_time = time.time()
 
         return [
             self.im_heat, self.marker_source, self.target_line,

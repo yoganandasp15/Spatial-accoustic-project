@@ -338,11 +338,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    target_csv = args.csv if args.csv else os.path.join(base_dir, "evidence", "stage2", "multimodal_4mic_vibration.csv")
-    target_out = args.outdir if args.outdir else os.path.join(base_dir, "evidence", "stage2")
-    
+    target_csv = args.csv if args.csv else os.path.join(base_dir, "evidence", "multimodal_4mic_vibration.csv")
+    target_out = args.outdir if args.outdir else os.path.join(base_dir, "evidence")
+
     if not os.path.exists(target_csv):
-        alt_csv = os.path.join(base_dir, "evidence", "stage2", "vibration_400hz_burst.csv")
+        alt_csv = os.path.join(base_dir, "evidence", "stage2", "multimodal_4mic_vibration.csv")
         if os.path.exists(alt_csv):
             target_csv = alt_csv
             

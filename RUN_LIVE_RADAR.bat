@@ -12,7 +12,7 @@ echo.
 set PYTHON_BIN=C:\Python314\python.exe
 if not exist "%PYTHON_BIN%" set PYTHON_BIN=python
 
-"%PYTHON_BIN%" "%~dp0src\spatial_acoustic_radar_pro.py"
+"%PYTHON_BIN%" "%~dp0stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py"
 if errorlevel 1 (
     echo.
     echo [ERROR] Application exited with error code %ERRORLEVEL%

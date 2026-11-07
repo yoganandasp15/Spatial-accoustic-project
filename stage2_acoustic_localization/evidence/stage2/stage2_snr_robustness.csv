@@ -1,0 +1,6 @@
+condition,median_ang_err_deg,mean_ang_err_deg,p90_ang_err_deg,success_pct_lt_5deg
+Clean (Inf dB),0.34,0.34,0.55,100.0
+20 dB SNR,0.34,0.34,0.61,100.0
+10 dB SNR,0.55,0.76,1.52,100.0
+0 dB SNR,2.52,3.10,5.87,80.0
+Multipath/Reverb,0.40,7.37,30.54,84.0

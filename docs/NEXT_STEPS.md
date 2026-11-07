@@ -29,14 +29,16 @@ All planned minor-project engineering goals have been achieved, verified, and pa
 
 1. **Open the PowerPoint Presentation:**
    * Launch `PRESENTATION_Spatial_Multimodal_EdgeAI.pptx` for the project review panel.
-2. **Execute the Stage 2 Verification Notebook / Script (Optional Proof):**
+2. **Execute the Stage 2 Verification Script or Unit Tests:**
    ```powershell
-   python src/stage2_acoustic_localization.py
+   python stage2_acoustic_localization/src/stage2_acoustic_localization.py
+   # Or run automated 5-test suite:
+   python -m unittest tests.test_multimodal_pipeline
    ```
-   * Verifies that all 25 test positions achieve $0.34^\circ$ median error and generates fresh evidence in `evidence/stage2/`.
+   * Verifies that all 25 test positions achieve $0.34^\circ$ median error and validates GCC-PHAT, order tracking, and SRP-PHAT.
 3. **Run the Live Interactive Hardware Demonstration:**
    * Connect the ESP32 USB cable to the laptop (COM8).
-   * Double-click `RUN_LIVE_RADAR.bat` (or run `python src/spatial_acoustic_radar_pro.py`).
+   * Double-click `RUN_LIVE_RADAR.bat` (or run `python stage4_realtime_fusion_radar/src/spatial_acoustic_radar_pro.py`).
    * **Test 1 (Acoustic Tracking):** Speak or snap fingers on the left and right sides of the breadboard; observe the DOA needle and left/right VU meters respond immediately. (Press `'I'` if you want to flip channel polarity).
    * **Test 2 (Motor Health Baseline):** Run the DC motor unloaded, press **`'B'`** to calibrate and lock the **Golden Baseline**.
    * **Test 3 (Fault Sensitivity):** Lightly apply finger friction to the motor shaft: observe speed drop ($\Delta\text{RPM} < 0$), audio RMS surge, and the Health Index drop from 95% to 68%.

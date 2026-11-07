@@ -37,18 +37,17 @@ Inside Gemini CLI, run:
 
 You should see the content from the project `GEMINI.md` and its imported context files. If you edited `GEMINI.md` after starting the session, run `/memory refresh` (or `/memory reload` if that is the command offered by your installed CLI version), then `/memory show` again.
 
-## 5. Give Gemini the first task
+## 5. Review Master Project Digest & Multi-Agent Protocol
 
-Open `GEMINI_FIRST_PROMPT.txt`, copy its contents, and paste it into Gemini CLI.
-
-It asks Gemini to understand the project and audit evidence first. It explicitly tells Gemini not to start changing code or making wiring diagrams until it has reported what it understands.
+Read `GPT_REVIEW_PACK.md` for a complete technical digest of derivations, algorithms, and empirical benchmark findings.
+Review `AGENTS.md` and `docs/AGENT_SYNCHRONIZATION_LOG.md` for the multi-agent operating protocol and activity history.
 
 ## 6. Add your working files
 
-When you later create Colab notebooks, Python scripts, circuit diagrams, or new output archives, save copies under this project folder (for example `notebooks/`, `src/`, `evidence/`, and `hardware/`). Gemini CLI can inspect local files in the working directory.
+When you later create Colab notebooks, Python scripts, circuit diagrams, or new output archives, save copies under this project folder (for example `stage1_...`, `stage2_...`, `evidence/`, and `hardware_photos/`). AI agents can inspect local files in the working directory.
 
 Do not delete the original uploaded evidence ZIPs. Keep a separate copy of new results with a date/version in the filename.
 
 ## 7. Important
 
-`GEMINI.md` is persistent context, not a substitute for the actual source/evidence files. The project proposal PDF and evidence archives are included so Gemini can inspect the source and outputs rather than relying only on the summary.
+Project documentation and evidence archives are included so any AI or human evaluator can inspect the source code, unit tests, and outputs directly.

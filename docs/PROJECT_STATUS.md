@@ -71,9 +71,10 @@ This document records the verified empirical evidence, implemented stages, and h
   * Pair B (Mics 3 & 4): GPIO 23 (I2S1 SD)
   * ADXL345: I2C on TX2 (GPIO 17, SDA) and RX2 (GPIO 16, SCL)
   * FC-03 Tachometer: Hardware ISR on D4 (GPIO 4)
-- **Clock vs. DMA Queue Alignment:** Shared SCK/WS locks physical sampling clock (0 PPM drift). Sequential `i2s_read` pulls 128-sample DMA blocks. Sub-sample inter-peripheral buffer synchronization is planned for major project characterization.
+- **Clock vs. DMA Queue Alignment:** Shared SCK/WS locks physical sampling clock (0 PPM drift). Inter-DMA phase calibration script (`stage2_acoustic_localization/src/calibrate_i2s_phase.py`) quantified inter-pair skew at $\Delta \tau = -24.69\ \mu\text{s}$ ($-1.09$ samples at 44.1 kHz, or $-0.27$ samples at 11.025 kHz), resolving cross-peripheral buffer alignment via deterministic 1-sample shift compensation.
 - **Sample Bit Shift:** Unpacking shifts INMP441 24-bit MSB-aligned data via `>> 16` directly into signed `int16_t` with unity digital gain.
-- **Live Link Performance:** Streams 11,025 Hz 4-channel 16-bit PCM + ADXL345 + Tachometer pulses over 921,600 baud serial on COM8 with 16-bit XOR checksum. Zero dropped packets observed under sustained continuous acquisition.
+- **Live Link Performance:** Streams 11,025 Hz 4-channel 16-bit PCM + ADXL345 + Tachometer pulses over 921,600 baud serial on COM8 at $90.10\text{ kB/s}$ ($97.8\%$ channel utilization). Packets protected by 16-bit XOR checksum with continuous sequence tracking.
+- **Test Suite Verification:** Automated unit test harness (`tests/test_multimodal_pipeline.py`) validates all 5 core subsystems (TDOA GCC-PHAT, Per-Axis Gravity Decoupling, Vibration Order Tracking, Checksum Verification, Fractional Delay Filtering) with 100% pass rate.
 - Firmware source: `stage3_esp32_firmware/ESP32_Spatial_Acoustic_Radar_Firmware/ESP32_Spatial_Acoustic_Radar_Firmware.ino`.
 
 ---
@@ -81,8 +82,10 @@ This document records the verified empirical evidence, implemented stages, and h
 ## 6. Real-Time Multimodal Sensor Fusion Suite (Stage 4)
 - Master application: `stage4_realtime_fusion_radar/src/spatial_acoustic_radar_pro.py` (Desktop launcher: `RUN_LIVE_RADAR.bat`).
 - **Explicit Evidence Mode Tag:** Live HUD displays current execution mode (`LIVE 4-MIC ULA PHYSICAL HARDWARE (COM8)`, `SYNTHETIC 4-CH ARRAY SIMULATION`, or `LAPTOP INTERNAL MIC DEMO`).
-- **Live 2D Thermal Heatmap:** Backprojects acoustic energy onto a spatial grid at 20 FPS with Direction of Arrival (DOA $\theta$) focus.
+- **2D Acoustic Camera (DOA θ-Focus Radial Backprojection):** Backprojects acoustic energy onto a spatial grid at 20 FPS with Direction of Arrival (DOA $\theta$) focus without artificial radial range priors.
+- **Vibration-Based Rotational Order Tracking:** Computes $1\times, 2\times, 3\times$ rotational orders directly from the ADXL345 vibration time-series buffer using a zero-padded 1024-point FFT ($\Delta f \approx 0.084\text{ Hz}$), eliminating audio-vibration cross-domain confusion.
+- **Dynamic Per-Axis Gravity Decoupling:** Dynamic vibration intensity is computed via per-axis running DC gravity estimation, accurately tracking unbalance and misalignment without canceling lateral oscillation.
 - **Dynamic VU Indicators:** Dedicated Left and Right flank intensity rails with square-root scaling and color alerts (Cyan $\to$ Amber $\to$ Red).
-- **ISO 10816-Inspired Vibration Severity Index:** Empirical dynamic acceleration grading ($a_{\text{dyn}} = |a_{\text{mag}} - 1.0g|$): Zone A Good, Zone B Permissible, Zone C Warning, Zone D Alarm.
+- **ISO 10816-Inspired Vibration Severity Index:** Empirical dynamic acceleration grading ($a_{\text{dyn}} = \sqrt{\sum (a_i - \bar{g}_i)^2}$): Zone A Good, Zone B Permissible, Zone C Warning, Zone D Alarm.
 - **Acoustic Kurtosis ($\kappa$) & Crest Factor:** Detects impulsive commutator sparking and bearing micro-impacts ($\kappa > 4.5$).
 - **Golden Baseline Differential Engine (Key `'B'`):** Captures reference healthy signature and alerts to real-time deltas ($\Delta\text{Vib}, \Delta\text{RPM}, \Delta\text{Kurt}, \Delta\text{RMS}$) with a continuous Composite Health Index bar ($0\text{--}100\%$).

@@ -38,5 +38,12 @@ $RECYCLE.BIN/
 *.sublime-project
 *.sublime-workspace
 
+# Credentials & Environment
+.env
+.env.*
+*.key
+*.pem
+*.token
+
 # Explicit inclusions
 !AGENTS.md
