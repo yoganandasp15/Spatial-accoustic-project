@@ -1,0 +1,35 @@
+{
+  "timestamp_eval": "2026-11-07",
+  "audio_source": "multimodal_4mic_audio.wav",
+  "vibration_source": "multimodal_4mic_vibration.csv",
+  "acoustic_spatial": {
+    "bearing_angle_deg": 5.223947596268431,
+    "radial_distance_m": 0.8786495319523023,
+    "prominence": 1.3765930745062247,
+    "kurtosis": 1.3156380653381348,
+    "crest_factor": 3.1604111194610596
+  },
+  "vibration_dynamics": {
+    "rms_g": 0.008920165816484728,
+    "peak_g": 0.02012454394812835,
+    "iso_zone": "Zone A: Good (Smooth)",
+    "static_gravity_g": 0.8178945489131262
+  },
+  "rotational_orders": {
+    "mean_rpm": 1500.0,
+    "rpm_jitter": 1.6077746776921858e-13,
+    "total_revolutions": 5,
+    "e_1x_pct": 8.88021430532615,
+    "e_2x_pct": 0.522066089553097,
+    "e_3x_pct": 4.583730305060088,
+    "e_sub_pct": 28.672837956070047,
+    "e_harmonics_pct": 28.65557180597187,
+    "primary_order_fault": "NOMINAL / BALANCED"
+  },
+  "multimodal_fusion": {
+    "composite_health_score": 95.0,
+    "health_verdict": "EXCELLENT / NOMINAL",
+    "primary_mechanical_fault": "NOMINAL / BALANCED",
+    "acoustic_direction_deg": 5.223947596268431
+  }
+}

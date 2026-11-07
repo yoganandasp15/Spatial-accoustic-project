@@ -96,17 +96,38 @@ To ensure complete academic integrity, project evidence is strictly separated in
 
 ## ⚡ Quick Start
 
-### 1. Run the Live Interactive Application
+### 1. Run the Offline Multimodal Benchmark (Zero Hardware Needed)
+Evaluates real recorded physical 4-channel audio and 3-axis vibration bursts, co-fuses SRP-PHAT with ISO vibration severity, and generates an executive 4-panel diagnostic plot:
+```cmd
+RUN_OFFLINE_BENCHMARK.bat
+```
+*(Or run `python stage4_realtime_fusion_radar/src/offline_multimodal_evaluator.py`)*
+
+### 2. Run the Automated Unit Test Suite
+Runs the 5-assertion test suite validating sub-microsecond TDOA (16 ns error), rotational order tracking on synthetic unbalance/misalignment, and SRP-PHAT spatial steering:
+```cmd
+RUN_UNIT_TESTS.bat
+```
+*(Or run `python -m unittest tests/test_multimodal_pipeline.py`)*
+
+### 3. Run the Dual-I²S DMA Phase Calibration
+Audits inter-peripheral clock skew between Pair A (I2S0) and Pair B (I2S1):
+```cmd
+RUN_CALIBRATION.bat
+```
+*(Or run `python stage2_acoustic_localization/src/calibrate_i2s_phase.py`)*
+
+### 4. Run the Live Interactive Application (ESP32 on COM8)
 Connect the ESP32 to USB (port `COM8`) and launch:
 ```cmd
 RUN_LIVE_RADAR.bat
 ```
 *(Or run `python stage4_realtime_fusion_radar/src/spatial_acoustic_radar_pro.py`)*
 
-### 2. Run the Stage 2 Localization Benchmark Suite
+### 5. Run the Stage 2 Localization Benchmark Suite
 ```powershell
 python stage2_acoustic_localization/src/stage2_acoustic_localization.py
 ```
 
-### 3. Open the PowerPoint Presentation
+### 6. Open the PowerPoint Presentation
 Launch `PRESENTATION_Spatial_Multimodal_EdgeAI.pptx` in Microsoft PowerPoint for the project evaluation review.
