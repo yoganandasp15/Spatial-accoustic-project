@@ -28,7 +28,7 @@ import struct
 import sys
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
@@ -874,14 +874,25 @@ class AudioSourceBase:
         return np.array([]), np.array([]), np.array([]), np.array([])
 
 
+def compute_packet_checksum(data: bytes) -> int:
+    """
+    Computes 16-bit XOR checksum initialized to 0x55AA across contiguous byte buffer.
+    Matches ESP32 firmware implementation for serial binary packets.
+    """
+    chk = 0x55AA
+    for i, b in enumerate(data):
+        chk ^= ((b << (i % 8)) & 0xFFFF)
+    return chk & 0xFFFF
+
+
 class ESP32MultimodalSource(AudioSourceBase):
     """
     Production 4-Channel Real-Time PCM Ingestion from ESP32 on COM8.
-    Streams 11,025 Hz 16-bit 4-channel audio + ADXL345 3-axis vibration + FC-03 tachometer
-    at 921,600 baud using zero-copy binary DMA packets.
+    Streams 11,025 Hz 16-bit 4-channel audio + ADXL345 3-axis vibration (continuous 400 Hz FIFO stream)
+    + FC-03 tachometer at 1,152,000 baud using zero-copy binary DMA packets (packet type 0x05).
     """
 
-    def __init__(self, port: str = "COM8", baudrates: Tuple[int, ...] = (921600, 115200)):
+    def __init__(self, port: str = "COM8", baudrates: Tuple[int, ...] = (1152000, 921600, 115200)):
         self.port = port
         self.baudrates = baudrates
         self.fs = 11025.0
@@ -902,6 +913,8 @@ class ESP32MultimodalSource(AudioSourceBase):
         self.vib_ring_ay = collections.deque(maxlen=2048)
         self.vib_ring_az = collections.deque(maxlen=2048)
 
+        self._rx_buf = bytearray()
+
         self.telemetry = {
             "ax_g": 0.0, "ay_g": -0.02, "az_g": -0.82,
             "rpm_pulses": 0, "estimated_rpm": 0.0,
@@ -913,7 +926,8 @@ class ESP32MultimodalSource(AudioSourceBase):
             "checksum_errors": 0,
             "dropped_packets": 0,
             "channels_active": 0,
-            "last_packet_time": 0.0
+            "last_packet_time": 0.0,
+            "num_vib_last": 0,
         }
         self.lock = threading.Lock()
         self.running = False
@@ -966,10 +980,313 @@ class ESP32MultimodalSource(AudioSourceBase):
             try: self.ser.close()
             except Exception: pass
 
-    def _worker(self):
-        HEADER_FORMAT = "<BBBBHHHhhhI"
-        HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+    @staticmethod
+    def build_packet_v2(
+        seq: int,
+        fs: int,
+        block_frames: int,
+        accel_samples: List[Tuple[int, int, int]],
+        audio_data: np.ndarray,
+        tach_pulses: int = 0
+    ) -> bytes:
+        """
+        Constructs a binary Packet Type 0x05 (PKT_TYPE_4CH_MULTIVIB) frame per PROJECT.md interface contract.
+        Header: 16 bytes (sync1, sync2, pkt_type=0x05, channels=4, seq, fs, block_frames, num_vib, reserved, pulses)
+        Vibration payload: num_vib * 6 bytes (int16 x_mg, y_mg, z_mg)
+        Audio payload: block_frames * 4 * 2 bytes (int16 PCM)
+        Checksum: 16-bit XOR initialized to 0x55AA across header, vibration, and audio payloads.
+        """
+        num_vib = len(accel_samples)
+        header = struct.pack(
+            "<BBBBHHHBBI",
+            0xAA, 0x55, 0x05, 4,
+            seq & 0xFFFF,
+            int(fs) & 0xFFFF,
+            int(block_frames) & 0xFFFF,
+            num_vib & 0xFF,
+            0x00,
+            tach_pulses & 0xFFFFFFFF
+        )
+        vib_bytes = bytearray()
+        for x, y, z in accel_samples:
+            vib_bytes.extend(struct.pack("<hhh", int(x), int(y), int(z)))
 
+        if audio_data.dtype in (np.float32, np.float64):
+            audio_int16 = (np.clip(audio_data, -1.0, 1.0) * 32767.0).astype(np.int16)
+        else:
+            audio_int16 = audio_data.astype(np.int16)
+        audio_bytes = audio_int16.tobytes()
+
+        data_to_checksum = header + bytes(vib_bytes) + audio_bytes
+        chk = compute_packet_checksum(data_to_checksum)
+        chk_bytes = struct.pack("<H", chk)
+
+        return data_to_checksum + chk_bytes
+
+    @staticmethod
+    def build_packet_v1(
+        seq: int,
+        fs: int,
+        block_frames: int,
+        accel_sample: Tuple[int, int, int],
+        audio_data: np.ndarray,
+        tach_pulses: int = 0
+    ) -> bytes:
+        """
+        Constructs a legacy binary Packet Type 0x04 frame for backward compatibility testing.
+        """
+        ax_mg, ay_mg, az_mg = accel_sample
+        header = struct.pack(
+            "<BBBBHHHhhhI",
+            0xAA, 0x55, 0x04, 4,
+            seq & 0xFFFF,
+            int(fs) & 0xFFFF,
+            int(block_frames) & 0xFFFF,
+            int(ax_mg), int(ay_mg), int(az_mg),
+            tach_pulses & 0xFFFFFFFF
+        )
+        if audio_data.dtype in (np.float32, np.float64):
+            audio_int16 = (np.clip(audio_data, -1.0, 1.0) * 32767.0).astype(np.int16)
+        else:
+            audio_int16 = audio_data.astype(np.int16)
+        audio_bytes = audio_int16.tobytes()
+
+        chk = 0x55AA
+        for i, b in enumerate(header):
+            chk ^= ((b << (i % 8)) & 0xFFFF)
+        for i, b in enumerate(audio_bytes):
+            chk ^= ((b << (i % 8)) & 0xFFFF)
+        chk_bytes = struct.pack("<H", chk)
+
+        return header + audio_bytes + chk_bytes
+
+    def _parse_incoming_bytes(self, chunk: bytes, port_str: str = "COM8", baud_str: Union[int, str] = 1152000) -> int:
+        """
+        Parses incoming serial byte stream into ring buffers and telemetry.
+        Handles both Type 0x05 (multi-sample continuous 400Hz vibration) and Type 0x04 (legacy single-sample).
+        Validates 16-bit XOR checksum, tracks dropped packets via sequence counter, and rejects corruption.
+        Returns the number of valid packets extracted in this call.
+        """
+        HEADER_FORMAT_V2 = "<BBBBHHHBBI"  # 16 bytes: sync1, sync2, pkt_type, channels, seq, fs, block_frames, num_vib, reserved, pulses
+        HEADER_SIZE_V2 = struct.calcsize(HEADER_FORMAT_V2)
+
+        HEADER_FORMAT_V1 = "<BBBBHHHhhhI"  # 20 bytes: sync1, sync2, pkt_type, channels, seq, fs, block_frames, ax, ay, az, pulses
+        HEADER_SIZE_V1 = struct.calcsize(HEADER_FORMAT_V1)
+
+        self._rx_buf.extend(chunk)
+        buf = self._rx_buf
+        parsed_count = 0
+
+        while len(buf) >= 3:
+            sync_idx = -1
+            for i in range(len(buf) - 1):
+                if buf[i] == 0xAA and buf[i+1] == 0x55:
+                    sync_idx = i
+                    break
+
+            if sync_idx == -1:
+                if len(buf) > 0 and buf[-1] == 0xAA:
+                    del buf[:-1]
+                else:
+                    buf.clear()
+                break
+
+            if sync_idx > 0:
+                del buf[:sync_idx]
+
+            if len(buf) < 3:
+                break
+
+            pkt_type = buf[2]
+
+            if pkt_type == 0x05:
+                if len(buf) < HEADER_SIZE_V2:
+                    break
+
+                sync1, sync2, ptype, channels, seq, fs_val, block_frames, num_vib, reserved, pulses = struct.unpack_from(
+                    HEADER_FORMAT_V2, buf, 0
+                )
+
+                vib_len = num_vib * 6
+                audio_len = block_frames * channels * 2
+                total_pkt_len = HEADER_SIZE_V2 + vib_len + audio_len + 2
+                if len(buf) < total_pkt_len:
+                    break
+
+                # 16-bit XOR Checksum Validation across header, vibration payload, and audio payload
+                expected_chk = struct.unpack_from("<H", buf, total_pkt_len - 2)[0]
+                data_bytes = bytes(buf[0 : total_pkt_len - 2])
+                chk = compute_packet_checksum(data_bytes)
+
+                if (chk & 0xFFFF) != (expected_chk & 0xFFFF):
+                    self.checksum_errors += 1
+                    del buf[:2]
+                    continue
+
+                # Valid Type 0x05 Packet
+                parsed_count += 1
+                self.packets_valid += 1
+                if self.last_seq is not None:
+                    expected_seq = (self.last_seq + 1) & 0xFFFF
+                    if seq != expected_seq:
+                        drop = (seq - expected_seq) & 0xFFFF
+                        if drop < 500:
+                            self.dropped_packets += drop
+                self.last_seq = seq
+                self.last_packet_time = time.time()
+
+                vib_bytes = bytes(buf[HEADER_SIZE_V2 : HEADER_SIZE_V2 + vib_len])
+                audio_bytes = bytes(buf[HEADER_SIZE_V2 + vib_len : HEADER_SIZE_V2 + vib_len + audio_len])
+
+                if num_vib > 0:
+                    raw_vib = np.frombuffer(vib_bytes, dtype=np.int16).reshape((num_vib, 3)).astype(np.float32) / 1000.0
+                    t_pkt = self.last_packet_time
+                    dt_vib = 1.0 / 400.0
+                    t_start = t_pkt - (num_vib - 1) * dt_vib
+                    with self.vib_ring_lock:
+                        for k in range(num_vib):
+                            self.vib_ring_time.append(t_start + k * dt_vib)
+                            self.vib_ring_ax.append(float(raw_vib[k, 0]))
+                            self.vib_ring_ay.append(float(raw_vib[k, 1]))
+                            self.vib_ring_az.append(float(raw_vib[k, 2]))
+                    latest_ax = float(raw_vib[-1, 0])
+                    latest_ay = float(raw_vib[-1, 1])
+                    latest_az = float(raw_vib[-1, 2])
+                else:
+                    latest_ax, latest_ay, latest_az = 0.0, 0.0, -0.82
+
+                samples = np.frombuffer(audio_bytes, dtype=np.int16).reshape((block_frames, channels)).astype(np.float32) / 32768.0
+                rms_ch = [float(np.sqrt(np.mean(samples[:, ch].astype(np.float64)**2))) for ch in range(channels)]
+                active_channels = sum(1 for r in rms_ch if r > 0.0003)
+
+                with self.lock:
+                    self.buffer = np.roll(self.buffer, -block_frames, axis=0)
+                    self.buffer[-block_frames:, :] = samples
+                    self.fs = float(fs_val)
+
+                    now = time.time()
+                    dt = now - self.last_pulse_time
+                    if dt >= 0.5:
+                        dp = pulses - self.last_pulse_count
+                        if dp >= 0 and dt > 0:
+                            self.telemetry["estimated_rpm"] = (dp / dt) * 60.0
+                        self.last_pulse_count = pulses
+                        self.last_pulse_time = now
+
+                    self.telemetry.update({
+                        "ax_g": latest_ax,
+                        "ay_g": latest_ay,
+                        "az_g": latest_az,
+                        "rpm_pulses": pulses,
+                        "firmware_mode": f"4-CH REAL-TIME PCM DMA STREAM ({port_str} @ {baud_str}) [Type 0x05 400Hz FIFO]",
+                        "is_hardware_alive": True,
+                        "packets_valid": self.packets_valid,
+                        "checksum_errors": self.checksum_errors,
+                        "dropped_packets": self.dropped_packets,
+                        "channels_active": active_channels,
+                        "last_packet_time": self.last_packet_time,
+                        "num_vib_last": num_vib,
+                        "rms_counts": [float(r * 32768.0) for r in rms_ch],
+                        "peak_counts": [int(np.max(np.abs(samples[:, ch])) * 32768.0) for ch in range(channels)]
+                    })
+
+                del buf[:total_pkt_len]
+
+            elif pkt_type == 0x04:
+                if len(buf) < HEADER_SIZE_V1:
+                    break
+
+                sync1, sync2, ptype, channels, seq, fs_val, block_frames, ax_mg, ay_mg, az_mg, pulses = struct.unpack_from(
+                    HEADER_FORMAT_V1, buf, 0
+                )
+
+                audio_len = block_frames * channels * 2
+                total_pkt_len = HEADER_SIZE_V1 + audio_len + 2
+                if len(buf) < total_pkt_len:
+                    break
+
+                expected_chk = struct.unpack_from("<H", buf, HEADER_SIZE_V1 + audio_len)[0]
+                hdr_bytes = bytes(buf[0 : HEADER_SIZE_V1])
+                payload_bytes = bytes(buf[HEADER_SIZE_V1 : HEADER_SIZE_V1 + audio_len])
+
+                chk = 0x55AA
+                for i, b in enumerate(hdr_bytes):
+                    chk ^= ((b << (i % 8)) & 0xFFFF)
+                for i, b in enumerate(payload_bytes):
+                    chk ^= ((b << (i % 8)) & 0xFFFF)
+
+                if (chk & 0xFFFF) != (expected_chk & 0xFFFF):
+                    self.checksum_errors += 1
+                    del buf[:2]
+                    continue
+
+                parsed_count += 1
+                self.packets_valid += 1
+                if self.last_seq is not None:
+                    expected_seq = (self.last_seq + 1) & 0xFFFF
+                    if seq != expected_seq:
+                        drop = (seq - expected_seq) & 0xFFFF
+                        if drop < 500:
+                            self.dropped_packets += drop
+                self.last_seq = seq
+                self.last_packet_time = time.time()
+
+                t_pkt = self.last_packet_time
+                with self.vib_ring_lock:
+                    self.vib_ring_time.append(t_pkt)
+                    self.vib_ring_ax.append(float(ax_mg) / 1000.0)
+                    self.vib_ring_ay.append(float(ay_mg) / 1000.0)
+                    self.vib_ring_az.append(float(az_mg) / 1000.0)
+
+                latest_ax = float(ax_mg) / 1000.0
+                latest_ay = float(ay_mg) / 1000.0
+                latest_az = float(az_mg) / 1000.0
+
+                samples = np.frombuffer(payload_bytes, dtype=np.int16).reshape((block_frames, channels)).astype(np.float32) / 32768.0
+                rms_ch = [float(np.sqrt(np.mean(samples[:, ch].astype(np.float64)**2))) for ch in range(channels)]
+                active_channels = sum(1 for r in rms_ch if r > 0.0003)
+
+                with self.lock:
+                    self.buffer = np.roll(self.buffer, -block_frames, axis=0)
+                    self.buffer[-block_frames:, :] = samples
+                    self.fs = float(fs_val)
+
+                    now = time.time()
+                    dt = now - self.last_pulse_time
+                    if dt >= 0.5:
+                        dp = pulses - self.last_pulse_count
+                        if dp >= 0 and dt > 0:
+                            self.telemetry["estimated_rpm"] = (dp / dt) * 60.0
+                        self.last_pulse_count = pulses
+                        self.last_pulse_time = now
+
+                    self.telemetry.update({
+                        "ax_g": latest_ax,
+                        "ay_g": latest_ay,
+                        "az_g": latest_az,
+                        "rpm_pulses": pulses,
+                        "firmware_mode": f"4-CH REAL-TIME PCM DMA STREAM ({port_str} @ {baud_str}) [Type 0x04 Legacy]",
+                        "is_hardware_alive": True,
+                        "packets_valid": self.packets_valid,
+                        "checksum_errors": self.checksum_errors,
+                        "dropped_packets": self.dropped_packets,
+                        "channels_active": active_channels,
+                        "last_packet_time": self.last_packet_time,
+                        "num_vib_last": 1,
+                        "rms_counts": [float(r * 32768.0) for r in rms_ch],
+                        "peak_counts": [int(np.max(np.abs(samples[:, ch])) * 32768.0) for ch in range(channels)]
+                    })
+
+                del buf[:total_pkt_len]
+
+            else:
+                # Unknown packet type or noise: advance 2 bytes past sync
+                del buf[:2]
+                continue
+
+        return parsed_count
+
+    def _worker(self):
         while self.running:
             target_port = self._find_port()
             connected = False
@@ -1004,7 +1321,7 @@ class ESP32MultimodalSource(AudioSourceBase):
                 time.sleep(1.0)
                 continue
 
-            buf = bytearray()
+            self._rx_buf.clear()
             last_rx_time = time.time()
 
             while self.running and self.ser and self.ser.is_open:
@@ -1012,110 +1329,8 @@ class ESP32MultimodalSource(AudioSourceBase):
                     n = self.ser.in_waiting
                     if n > 0:
                         chunk = self.ser.read(n)
-                        buf.extend(chunk)
                         last_rx_time = time.time()
-
-                        while len(buf) >= HEADER_SIZE:
-                            sync_idx = -1
-                            for i in range(len(buf) - 1):
-                                if buf[i] == 0xAA and buf[i+1] == 0x55:
-                                    sync_idx = i
-                                    break
-
-                            if sync_idx == -1:
-                                buf.clear()
-                                break
-
-                            if sync_idx > 0:
-                                del buf[:sync_idx]
-
-                            if len(buf) < HEADER_SIZE:
-                                break
-
-                            sync1, sync2, pkt_type, channels, seq, fs, block_frames, ax_mg, ay_mg, az_mg, pulses = struct.unpack_from(
-                                HEADER_FORMAT, buf, 0
-                            )
-
-                            payload_len = block_frames * channels * 2
-                            total_pkt_len = HEADER_SIZE + payload_len + 2
-                            if len(buf) < total_pkt_len:
-                                break
-
-                            # 16-bit XOR Checksum Validation
-                            expected_chk = struct.unpack_from("<H", buf, HEADER_SIZE + payload_len)[0]
-                            hdr_bytes = bytes(buf[0 : HEADER_SIZE])
-                            payload_bytes = bytes(buf[HEADER_SIZE : HEADER_SIZE + payload_len])
-
-                            chk = 0x55AA
-                            for i, b in enumerate(hdr_bytes):
-                                chk ^= ((b << (i % 8)) & 0xFFFF)
-                            for i, b in enumerate(payload_bytes):
-                                chk ^= ((b << (i % 8)) & 0xFFFF)
-
-                            if (chk & 0xFFFF) != (expected_chk & 0xFFFF):
-                                self.checksum_errors += 1
-                                # Discard current sync byte to search for next valid frame
-                                del buf[:2]
-                                continue
-
-                            # Packet Valid! Update sequence and tracking
-                            self.packets_valid += 1
-                            if self.last_seq is not None:
-                                expected_seq = (self.last_seq + 1) & 0xFFFF
-                                if seq != expected_seq:
-                                    drop = (seq - expected_seq) & 0xFFFF
-                                    if drop < 500:
-                                        self.dropped_packets += drop
-                            self.last_seq = seq
-                            self.last_packet_time = time.time()
-
-                            # Buffer accelerometer sample into decoupled thread-safe ring buffer
-                            t_pkt = self.last_packet_time
-                            with self.vib_ring_lock:
-                                self.vib_ring_time.append(t_pkt)
-                                self.vib_ring_ax.append(float(ax_mg) / 1000.0)
-                                self.vib_ring_ay.append(float(ay_mg) / 1000.0)
-                                self.vib_ring_az.append(float(az_mg) / 1000.0)
-
-                            raw_payload = payload_bytes
-                            samples = np.frombuffer(raw_payload, dtype=np.int16).reshape((block_frames, channels)).astype(np.float32) / 32768.0
-
-                            rms_ch = [float(np.sqrt(np.mean(samples[:, i].astype(np.float64)**2))) for i in range(channels)]
-                            active_channels = sum(1 for r in rms_ch if r > 0.0003)
-
-                            with self.lock:
-                                self.buffer = np.roll(self.buffer, -block_frames, axis=0)
-                                self.buffer[-block_frames:, :] = samples
-                                self.fs = float(fs)
-
-                                # Update tachometer speed
-                                now = time.time()
-                                dt = now - self.last_pulse_time
-                                if dt >= 0.5:
-                                    dp = pulses - self.last_pulse_count
-                                    if dp >= 0 and dt > 0:
-                                        self.telemetry["estimated_rpm"] = (dp / dt) * 60.0
-                                    self.last_pulse_count = pulses
-                                    self.last_pulse_time = now
-
-                                self.telemetry.update({
-                                    "ax_g": ax_mg / 1000.0,
-                                    "ay_g": ay_mg / 1000.0,
-                                    "az_g": az_mg / 1000.0,
-                                    "rpm_pulses": pulses,
-                                    "firmware_mode": f"4-CH REAL-TIME PCM DMA STREAM ({target_port} @ {self.ser.baudrate})",
-                                    "is_hardware_alive": True,
-                                    "packets_valid": self.packets_valid,
-                                    "checksum_errors": self.checksum_errors,
-                                    "dropped_packets": self.dropped_packets,
-                                    "channels_active": active_channels,
-                                    "last_packet_time": self.last_packet_time,
-                                    "rms_counts": [float(r * 32768.0) for r in rms_ch],
-                                    "peak_counts": [int(np.max(np.abs(samples[:, i])) * 32768.0) for i in range(channels)]
-                                })
-
-                            del buf[:total_pkt_len]
-
+                        self._parse_incoming_bytes(chunk, port_str=target_port, baud_str=self.ser.baudrate)
                     else:
                         if time.time() - last_rx_time > 3.0:
                             self.ser.write(b"S\n")
@@ -1157,6 +1372,10 @@ class ESP32MultimodalSource(AudioSourceBase):
     def get_multimodal_telemetry(self) -> Dict[str, object]:
         with self.lock:
             return self.telemetry.copy()
+
+
+# Backward compatibility alias
+SerialAudioSource = ESP32MultimodalSource
 
 
 class Synthetic4ChSource(AudioSourceBase):
