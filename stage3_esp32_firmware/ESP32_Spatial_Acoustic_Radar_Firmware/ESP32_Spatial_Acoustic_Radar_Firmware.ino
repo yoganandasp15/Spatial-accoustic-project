@@ -127,6 +127,13 @@ void read_adxl(int16_t &ax_mg, int16_t &ay_mg, int16_t &az_mg) {
 }
 
 void init_dual_i2s_4mic() {
+    // Hardware Clocking Invariant:
+    // I2S0 (Master) drives physical SCK (GPIO 18) and WS (GPIO 21).
+    // I2S1 (Slave) samples on the exact same physical clock pins via Schmitt input buffers.
+    // This hardware-locks the sampling frequency (0 PPM frequency drift between pairs).
+    // Note on Sample Alignment: Both DMA receivers are queued consecutively; while hardware
+    // clocks are locked, minor inter-peripheral DMA descriptor startup offsets may exist
+    // until verified via simultaneous multi-channel impulse cross-correlation.
     gpio_set_pull_mode((gpio_num_t)I2S0_SD_PIN, GPIO_PULLDOWN_ONLY);
     gpio_set_pull_mode((gpio_num_t)I2S1_SD_PIN, GPIO_PULLDOWN_ONLY);
 
@@ -223,12 +230,15 @@ void loop() {
     if (e0 == ESP_OK && e1 == ESP_OK && r0 == target_bytes && r1 == target_bytes) {
         int64_t s1 = 0, s2 = 0, s3 = 0, s4 = 0;
 
-        // Unpack 24-bit audio in 32-bit slot (shift >> 14 for clear signal level)
+        // Unpack 24-bit audio in 32-bit slot:
+        // INMP441 transmits 24-bit audio MSB-aligned in bits [31:8] with bits [7:0] zero-padded.
+        // Shifting >> 16 maps the upper 16 MSBs directly into signed int16_t with unity digital gain,
+        // preventing peak clipping on loud acoustic transients.
         for (int i = 0; i < CHUNK_FRAMES; i++) {
-            int16_t m1 = (int16_t)(dma_rx0[2 * i] >> 14);     // Pair A Left
-            int16_t m2 = (int16_t)(dma_rx0[2 * i + 1] >> 14); // Pair A Right
-            int16_t m3 = (int16_t)(dma_rx1[2 * i] >> 14);     // Pair B Left
-            int16_t m4 = (int16_t)(dma_rx1[2 * i + 1] >> 14); // Pair B Right
+            int16_t m1 = (int16_t)(dma_rx0[2 * i] >> 16);     // Pair A Left  (Mic 1, Row 20)
+            int16_t m2 = (int16_t)(dma_rx0[2 * i + 1] >> 16); // Pair A Right (Mic 2, Row 28)
+            int16_t m3 = (int16_t)(dma_rx1[2 * i] >> 16);     // Pair B Left  (Mic 3, Row 36)
+            int16_t m4 = (int16_t)(dma_rx1[2 * i + 1] >> 16); // Pair B Right (Mic 4, Row 44)
 
             tx_audio_chunk[i].m1 = m1;
             tx_audio_chunk[i].m2 = m2;

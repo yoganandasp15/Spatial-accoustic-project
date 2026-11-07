@@ -75,7 +75,9 @@ the proposed system answers two essential diagnostic questions in real time:
 ### 2.3 Stage 3: Classic ESP32 Dual-I2S Acquisition Architecture
 * **Overcoming Classic ESP32 Hardware Constraints:**
   * The ESP32-WROOM-32 lacks hardware TDM (Time Division Multiplexing).
-  * **Solution:** Configured simultaneous **Dual-I2S DMA engines** (I2S0 and I2S1) sharing master bit clock (SCK = GPIO 18) and word select (WS = GPIO 21).
+  * **Solution:** Configured simultaneous **Dual-I2S DMA engines** (I2S0 Master, I2S1 Slave) sharing master bit clock (SCK = GPIO 18) and word select (WS = GPIO 21).
+  * **Clock vs. DMA Synchronization:** Sharing SCK and WS locks the sampling frequency across all 4 channels (0 PPM drift). Sequential 128-sample DMA buffer reads (`i2s_read`) pull data blocks synchronously within DMA block intervals. Sub-sample inter-peripheral buffer phase calibration is planned for future laboratory bench characterization.
+  * **Sample Bit-Shift Invariant:** INMP441 outputs 24-bit audio MSB-aligned in a 32-bit slot; unpacking shifts by `>> 16` directly into signed `int16_t` with unity gain, avoiding digital clipping.
   * **Pair A (Mics 1 & 2):** GPIO 19 (I2S0 SD)
   * **Pair B (Mics 3 & 4):** GPIO 23 (I2S1 SD)
   * **ADXL345 Accelerometer:** Hardware I2C (SDA = TX2/GPIO 17, SCL = RX2/GPIO 16)
@@ -83,14 +85,16 @@ the proposed system answers two essential diagnostic questions in real time:
 * **DMA Streaming Link:** Streams 11,025 Hz 4-channel 16-bit PCM + ADXL345 + Tachometer pulses over 921,600 baud serial with 16-bit XOR packet checksum.
 * **Observed Link Performance:** Zero dropped packets; 79.4 kB/s throughput verified under continuous operation.
 
-### 2.4 Stage 4: Real-Time Multimodal Fusion Engine (`src/spatial_acoustic_radar_pro.py`)
-* **Live 2D Thermal Heatmap:** Backprojects acoustic energy onto a $60 \times 60$ floor grid at 20 FPS using bicubic interpolation.
+### 2.4 Stage 4: Real-Time Multimodal Fusion Engine (`spatial_acoustic_radar_pro.py`)
+* **Explicit Evidence Mode Tag:** Live HUD prominently displays the active data mode (`[MODE: LIVE 4-MIC ULA PHYSICAL HARDWARE (COM8)]`, `[MODE: SYNTHETIC 4-CH ARRAY SIMULATION]`, or `[MODE: LAPTOP INTERNAL MIC DEMO]`).
+* **Live 2D Thermal Heatmap:** Backprojects acoustic energy onto a $60 \times 60$ floor grid at 20 FPS with Direction of Arrival (DOA bearing $\theta$) focus.
 * **Directional Intensity Rails:** Real-time Left / Center / Right VU meters with perceptual square-root scaling and color transitions (Cyan $\to$ Amber $\to$ Red).
-* **ISO 10816 Standard Compliance:** Dynamic vibration severity grading ($a_{\text{dyn}} = |a_{\text{mag}} - 1.0g|$):
+* **ISO 10816-Inspired Vibration Severity Index:** Dynamic acceleration grading ($a_{\text{dyn}} = |a_{\text{mag}} - 1.0g|$):
   * Zone A: Good / Smooth ($<0.15g$)
   * Zone B: Permissible ($0.15\text{--}0.35g$)
   * Zone C: Warning ($0.35\text{--}0.70g$)
   * Zone D: Alarm ($>0.70g$)
+  * *(Note: Strict ISO 10816-1 specifies velocity RMS in mm/s; dynamic acceleration is utilized here as an edge-computable vibration severity indicator).*
 * **Acoustic Kurtosis ($\kappa$) & Crest Factor:** Detects non-Gaussian impulsive spiking from electrical brush arcing and bearing raceway micro-pitting.
 * **Golden Baseline Differential Engine (Key `'B'`):**
   * Calibrates and locks healthy nominal reference values ($\text{RPM}_0, a_0, \kappa_0, \mathbf{S}_0$).

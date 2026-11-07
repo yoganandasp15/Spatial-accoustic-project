@@ -54,6 +54,14 @@
   * Verified noise robustness: 0.34° median error at 20 dB SNR, 0.55° at 10 dB SNR, 0.40° in reverberant multipath.
   * Packaged 10-slide executive PowerPoint presentation (`PRESENTATION_Spatial_Multimodal_EdgeAI.pptx`) and final report (`MINOR_PROJECT_FINAL_REPORT.md`).
 
+### Entry 5 — 7 November 2026: ChatGPT Peer Review Audit & Rigorous Reconciliation
+* **Audit Items Addressed**:
+  * *Firmware Bit-Shift*: Changed `>> 14` to standard MSB-aligned `>> 16` in `ESP32_Spatial_Acoustic_Radar_Firmware.ino`, eliminating risk of digital clipping.
+  * *Dual-I2S Clock Synchronization*: Clarified that shared GPIO 18 (SCK) and GPIO 21 (WS) lock hardware sampling frequency (0 PPM drift); noted that sequential `i2s_read` operates on 128-frame DMA blocks with sub-sample cross-peripheral chirp calibration planned for major-project bench testing.
+  * *Evidence Tiers*: Structured evidence cleanly into 4 distinct tiers: Dataset Ground Truth (MAFAULDA/CWRU), Numerical Simulation (Stage 2), Physical Embedded Hardware (ESP32 on COM8), and Interactive Software Demonstrator (Stage 4).
+  * *1D ULA Bearing Focus & Evidence Tag*: Added dynamic evidence mode banner to the GUI (`LIVE 4-MIC HARDWARE`, `SYNTHETIC SIMULATION`, `LAPTOP MIC`) and clarified that DOA bearing angle $\theta$ is the primary physical observable.
+  * *ISO 10816 Rigor*: Rebranded raw acceleration severity to "ISO 10816-Inspired Dynamic Vibration Index (g)" to maintain strict academic accuracy regarding velocity RMS.
+
 ---
 
 ## 📐 Mathematical & Algorithmic Formulation
@@ -76,11 +84,12 @@ $$P(\mathbf{x}) = \sum_{p=1}^6 w_p \cdot \max\left(0, R_{p}\left(\tau_p(\mathbf{
 
 ### 3. Vibration & Rotational Order Diagnostics
 * **Dynamic Acceleration**: $a_{\text{dyn}} = \max\left(0, \sqrt{a_x^2 + a_y^2 + a_z^2} - 1.0g\right)$
-* **ISO 10816 Severity Classification (Class 1 Machines < 15 kW)**:
+* **ISO 10816-Inspired Severity Classification (Class 1 Machines < 15 kW)**:
   * Zone A (Good): $a_{\text{dyn}} < 0.15g$
   * Zone B (Permissible): $0.15g \le a_{\text{dyn}} < 0.35g$
   * Zone C (Warning): $0.35g \le a_{\text{dyn}} < 0.70g$
   * Zone D (Alarm): $a_{\text{dyn}} \ge 0.70g$
+  * *(Academic Note: Strict ISO 10816-1 specifies vibration velocity RMS $v_{\text{rms}}$ in mm/s over 10 Hz – 1000 Hz. Here, dynamic acceleration magnitude is used as an edge-computable severity proxy).*
 * **Acoustic Kurtosis ($\kappa$) & Crest Factor ($C_f$)**:
   $$\kappa = \frac{\frac{1}{N}\sum_{n=1}^N (x_n - \mu)^4}{\left(\frac{1}{N}\sum_{n=1}^N (x_n - \mu)^2\right)^2}, \quad C_f = \frac{\max|x_n|}{x_{\text{rms}}}$$
   $\kappa \approx 3.0$ indicates nominal Gaussian noise. Values $\kappa > 4.5$ indicate impulsive transients (bearing raceway micro-pitting or electrical brush arcing).

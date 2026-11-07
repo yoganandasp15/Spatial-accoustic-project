@@ -2,11 +2,11 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform: ESP32 + Python](https://img.shields.io/badge/Platform-ESP32%20%7C%20Python%203.14-green.svg)](docs/HARDWARE_STATUS.md)
-[![Status: Minor Complete](https://img.shields.io/badge/Status-Minor%20Complete%20(7%20Nov%202026)-success.svg)](docs/PROJECT_STATUS.md)
+[![Status: Minor Evaluation Ready](https://img.shields.io/badge/Status-Minor%20Evaluation%20Ready%20(7%20Nov%202026)-success.svg)](docs/PROJECT_STATUS.md)
 
 An end-to-end multimodal condition monitoring suite combining a **4-microphone INMP441 uniform linear array**, an **ADXL345 3-axis accelerometer**, and an **FC-03 optical tachometer** to simultaneously answer two questions for rotating machinery:
 1. **WHAT is wrong with the motor?** (Mass Unbalance, Shaft Misalignment, Bearing Impact / Brush Arcing, Commutator Drag).
-2. **WHERE is the dominant acoustic sound coming from?** (Real-time 2D acoustic camera heatmap and direction-of-arrival bearing angle $\theta \in [-90^\circ, +90^\circ]$).
+2. **WHERE is the dominant acoustic sound coming from?** (Real-time Direction of Arrival bearing angle $\theta \in [-90^\circ, +90^\circ]$ and 2D acoustic camera heatmap).
 
 ---
 
@@ -29,7 +29,7 @@ An end-to-end multimodal condition monitoring suite combining a **4-microphone I
                          │                  │              │
                          ▼                  ▼              ▼
                     Shaft Speed       Dynamic Vib      Kurtosis &
-                    (RPM, Jitter)    (ISO 10816)      Spatial DOA
+                    (RPM, Jitter)    (ISO-Inspired)   Spatial DOA
                          │                  │              │
                          └──────────┬───────┴──────────────┘
                                     ▼
@@ -38,7 +38,7 @@ An end-to-end multimodal condition monitoring suite combining a **4-microphone I
                     │  - Real-time Health Index (0 - 100%)   │
                     │  - Golden Baseline Delta Comparator    │
                     │  - Harmonic Order Separation (1x, 2x)  │
-                    │  - 2D Thermal Acoustic Camera Heatmap  │
+                    │  - 2D Acoustic Camera Heatmap (DOA θ)  │
                     └────────────────────────────────────────┘
 ```
 
@@ -58,6 +58,8 @@ Spatial-accoustic-project/
 │   ├── PROJECT_STATUS.md                        # Master evidence matrix (Stages 1-4)
 │   ├── HARDWARE_STATUS.md                       # Verified breadboard wiring & pinout
 │   ├── NEXT_STEPS.md                            # Student checklist & Major-project roadmap
+│   ├── daily_logs/                              # Date-wise development and experiment logs
+│   ├── reviews/                                 # AI & Peer review transcripts and audits
 │   └── references/Minor_project_topic_1.pdf     # Approved academic proposal PDF
 │
 ├── stage1_vibration_and_tachometer/             # STAGE 1: Dataset physics & baseline findings
@@ -69,7 +71,7 @@ Spatial-accoustic-project/
 │   └── evidence/                                # Error distributions, CDFs, and heatmaps
 │
 ├── stage3_esp32_firmware/                       # STAGE 3: Production embedded firmware
-│   └── ESP32_Spatial_Acoustic_Radar_Firmware/   # 11,025 Hz 4-ch DMA streaming on COM8
+│   └── ESP32_Spatial_Acoustic_Radar_Firmware/   # 11,025 Hz 4-ch DMA streaming on COM8 (>>16)
 │
 ├── stage4_realtime_fusion_radar/                # STAGE 4: Real-time GUI & Golden Baseline
 │   └── src/spatial_acoustic_radar_pro.py        # Master interactive radar application
@@ -79,15 +81,16 @@ Spatial-accoustic-project/
 
 ---
 
-## 📊 Summary of Completed Evidence
+## 📊 Summary of Completed Evidence & Scientific Tiers
 
-| Stage | Focus Area | Status | Key Metric / Observed Evidence |
-| :--- | :--- | :---: | :--- |
-| **Stage 1** | Rotational Orders & Vibration | **VERIFIED** | 10g unbalance surges $1\times$ order energy to 66.6% in MAFAULDA |
-| **Stage 2** | Acoustic Localization (25 Pts) | **VERIFIED** | **0.34° median error**; **100.0% pass rate** (<5° error threshold) |
-| **Stage 2D**| Noise Robustness & Reverberation | **VERIFIED** | Sub-degree accuracy down to 10 dB SNR; 80% pass at 0 dB SNR |
-| **Stage 3** | ESP32 Hardware Acquisition | **VERIFIED** | 11,025 Hz 4-ch DMA PCM @ 921,600 baud with 0 dropped packets |
-| **Stage 4** | Multimodal Motor Health HUD | **VERIFIED** | ISO 10816 grading, Kurtosis $\kappa$, Golden Baseline (Key `'B'`) |
+To ensure complete academic integrity, project evidence is strictly separated into four empirical tiers:
+
+| Tier | Modality / Stage | Evidence Source | Status | Key Metric / Observed Ground Truth |
+| :--- | :--- | :--- | :---: | :--- |
+| **Tier 1** | Machine Fault Physics (Stage 1) | **MAFAULDA & CWRU Datasets** | **VERIFIED** | 10g unbalance surges $1\times$ order energy to 66.6% (vs 8.4% Normal); tachometer matches spectrum within 0.047% |
+| **Tier 2** | Acoustic Localization (Stage 2) | **Numerical Simulation Proof**| **VERIFIED** | **0.34° median error** across 25 off-grid test points; 100% pass rate (<5°); robust down to 10 dB SNR |
+| **Tier 3** | Embedded Hardware (Stage 3) | **Classic ESP32 Prototype** | **VERIFIED** | Dual-I2S clock-locked 11,025 Hz 4-ch PCM (`>>16`), ADXL345 I2C ($a_z \approx -0.82g$), FC-03 tachometer on COM8 @ 921,600 baud |
+| **Tier 4** | Multimodal Fusion HUD (Stage 4) | **Live Interactive GUI** | **VERIFIED** | Live 2D acoustic camera (DOA $\theta$ focus), ISO-inspired severity, Kurtosis $\kappa$, and Golden Baseline (Key `'B'`) |
 
 ---
 

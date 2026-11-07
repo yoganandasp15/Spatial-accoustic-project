@@ -508,15 +508,16 @@ class AcousticClassifier:
         rms = float(np.sqrt(np.mean(x ** 2)))
         peak = float(np.max(np.abs(x))) if len(x) else 0.0
 
-        # ISO 10816 Vibration severity (in g)
-        # Class 1/2 machines: <0.15g Good, 0.15-0.35g Permissible, 0.35-0.70g Warning, >0.70g Fault
+        # Dynamic Vibration Severity Index (Empirical zones inspired by ISO 10816 Class 1)
+        # Note: Strict ISO 10816 requires velocity RMS (mm/s). Here, dynamic acceleration magnitude
+        # (dynamic_g = |vib_mag - 1.0g| in g) provides an indicative edge severity proxy.
         dynamic_g = max(0.0, vib_mag_g - 1.0) # Subtract 1g static gravity
         if dynamic_g > 0.45:
-            severity = "ALERT: EXCESSIVE VIBRATION (ISO 10816 UNACCEPTABLE)"
+            severity = "ALERT: EXCESSIVE VIBRATION (ISO Zone D Proxy)"
         elif dynamic_g > 0.20:
-            severity = "WARNING: ELEVATED VIBRATION (ISO 10816 MARGINAL)"
+            severity = "WARNING: ELEVATED VIBRATION (ISO Zone C Proxy)"
         else:
-            severity = "NOMINAL: HEALTHY VIBRATION (ISO 10816 GOOD)"
+            severity = "NOMINAL: HEALTHY VIBRATION (ISO Zone A/B Proxy)"
 
         if rms < 1e-4:
             return {
@@ -659,24 +660,26 @@ class MultimodalMotorEngine:
             self.rpm_history.pop(0)
         rpm_jitter = float(np.std(self.rpm_history)) if len(self.rpm_history) > 3 else 0.0
 
-        # 1. Vibration Severity (ISO 10816 for small industrial machines Class 1)
+        # 1. Dynamic Vibration Severity Index (Empirical zones inspired by ISO 10816 Class 1)
+        # Note: Strict ISO 10816-1 requires vibration velocity RMS (v_rms in mm/s).
+        # Dynamic acceleration magnitude (dyn_g = |total_g - 1.0g| in g) is used as an edge proxy.
         total_g = math.sqrt(ax_g**2 + ay_g**2 + az_g**2)
         dyn_g = max(0.0, total_g - 1.0) # Subtract 1g static gravity
 
         if dyn_g < 0.15:
-            iso_severity = "ZONE A: GOOD / NOMINAL (ISO 10816)"
+            iso_severity = "ZONE A: GOOD / NOMINAL (ISO-Inspired)"
             iso_color = "#00ffcc"
             vib_penalty = dyn_g / 0.15 * 5.0
         elif dyn_g < 0.35:
-            iso_severity = "ZONE B: PERMISSIBLE (MILD WEAR)"
+            iso_severity = "ZONE B: PERMISSIBLE (ISO-Inspired)"
             iso_color = "#33ccff"
             vib_penalty = 5.0 + (dyn_g - 0.15) / 0.20 * 15.0
         elif dyn_g < 0.70:
-            iso_severity = "ZONE C: WARNING (ELEVATED VIB)"
+            iso_severity = "ZONE C: WARNING (ISO-Inspired)"
             iso_color = "#ffaa00"
             vib_penalty = 20.0 + (dyn_g - 0.35) / 0.35 * 30.0
         else:
-            iso_severity = "ZONE D: UNACCEPTABLE / ALARM"
+            iso_severity = "ZONE D: UNACCEPTABLE / ALARM (ISO-Inspired)"
             iso_color = "#ff0055"
             vib_penalty = 50.0 + min(35.0, (dyn_g - 0.70) * 40.0)
 
@@ -703,7 +706,7 @@ class MultimodalMotorEngine:
         elif crest > 4.5 and kurt > 4.5:
             fault_label = "BEARING IMPACT / BRUSH ARCING (High Kurtosis)"
         elif dyn_g > 0.35:
-            fault_label = "ELEVATED MECHANICAL VIBRATION (ISO 10816 WARN)"
+            fault_label = "ELEVATED MECHANICAL VIBRATION (ISO Zone C Alert)"
         elif rms > 0.035 and kurt < 2.5:
             fault_label = "COMMUTATOR NOISE / MECHANICAL DRAG"
 
@@ -1165,6 +1168,20 @@ class AcousticRadarApp:
 
         self._setup_ui()
 
+    def _get_evidence_mode_tag(self) -> str:
+        """Returns clear evidence mode tag distinguishing physical hardware from simulation."""
+        if self.active_source_type == "ESP32":
+            telemetry = self.current_source.get_multimodal_telemetry()
+            if telemetry.get("is_hardware_alive", False):
+                return "MODE: LIVE 4-MIC ULA PHYSICAL HARDWARE (COM8)"
+            else:
+                return "MODE: ESP32 STANDBY / DISCONNECTED"
+        elif self.active_source_type == "SYNTHETIC":
+            return "MODE: SYNTHETIC 4-CH ARRAY SIMULATION"
+        elif self.active_source_type == "LAPTOP":
+            return "MODE: LAPTOP INTERNAL MIC DEMO"
+        return f"MODE: {self.active_source_type}"
+
     def _setup_ui(self):
         plt.style.use("dark_background")
         self.fig = plt.figure(figsize=(17, 9.5), facecolor="#0a0e17")
@@ -1201,7 +1218,7 @@ class AcousticRadarApp:
         )
 
         self.cb = self.fig.colorbar(self.im_heat, ax=self.ax_map, fraction=0.046, pad=0.04)
-        self.cb.set_label("Live Acoustic Thermal Energy (W/m² Rel)", color="#b8c2d1", fontsize=10)
+        self.cb.set_label("Live Acoustic Intensity (SRP-PHAT Relative Power)", color="#b8c2d1", fontsize=10)
         self.cb.ax.tick_params(colors="#b8c2d1", labelsize=9)
 
         # Dynamic Side Intensity Indicators (Left & Right Flank VU Rails)
@@ -1289,7 +1306,7 @@ class AcousticRadarApp:
         self.ax_map.set_ylim(Y_MIN, Y_MAX)
         self.ax_map.set_xlabel("Left / Right Offset (m)", color="#b8c2d1", fontsize=11)
         self.ax_map.set_ylabel("Range in Front of Array (m)", color="#b8c2d1", fontsize=11)
-        self.ax_map.set_title("2D ACOUSTIC CAMERA & FAULT LOCALIZER", color="#ffffff", fontsize=12, pad=10, weight="bold")
+        self.ax_map.set_title("2D ACOUSTIC CAMERA (DOA θ-FOCUS RADIAL BACKPROJECTION)", color="#ffffff", fontsize=11, pad=10, weight="bold")
         self.ax_map.tick_params(colors="#b8c2d1")
         self.ax_map.legend(loc="upper right", facecolor="#101726", edgecolor="#2a3b5c", fontsize=9)
         self.ax_map.grid(alpha=0.15, color="#34496d")
@@ -1379,8 +1396,8 @@ class AcousticRadarApp:
         # Main Title Banner
         self.title_text = self.fig.text(
             0.04, 0.968,
-            f"SPATIAL MULTIMODAL ACOUSTIC RADAR | 4-MIC ARRAY ({self.geometry.name})",
-            color="#00ffcc", fontsize=12.5, weight="bold"
+            f"SPATIAL MULTIMODAL ACOUSTIC RADAR | [{self._get_evidence_mode_tag()}]",
+            color="#00ffcc", fontsize=11.5, weight="bold"
         )
 
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
@@ -1671,8 +1688,12 @@ class AcousticRadarApp:
             else:
                 base_str = "UNLOCKED  [Press 'B' to Learn Reference Baseline]"
 
+            mode_tag = self._get_evidence_mode_tag()
+            self.title_text.set_text(f"SPATIAL MULTIMODAL ACOUSTIC RADAR | [{mode_tag}]")
+
             hud_lines = [
                 "==========================================================================================",
+                f" [EVIDENCE MODE]       [{mode_tag}]",
                 f" [MOTOR HEALTH INDEX]  [{h_bar}] {h_score:4.1f}% | {h_status}",
                 f" [DIAGNOSED FAULT]     {motor_diag['primary_fault']}",
                 f" [GOLDEN BASELINE]     {base_str}",
@@ -1680,7 +1701,7 @@ class AcousticRadarApp:
                 f" [S1: FC-03 TACH]     Speed: {rpm:6.1f} RPM (f0 = {motor_diag['f0_hz']:4.1f} Hz) | Jitter: ±{motor_diag['rpm_jitter']:3.1f} RPM",
                 f"                      Total: {pulses:6d} Pulses | PPR: {self.pulses_per_rev} (Key 'P' to cycle)",
                 f" [S2: ADXL345 3-AXIS] Vib: {dyn_vib_g:4.2f}g dyn (Tot: {total_g:4.2f}g) | [X:{ax_g:+5.2f}, Y:{ay_g:+5.2f}, Z:{az_g:+5.2f}]",
-                f"                      ISO 10816: {motor_diag['iso_severity']}",
+                f"                      Vib Severity: {motor_diag['iso_severity']}",
                 f" [S3: 4-MIC ACOUSTIC] Kurtosis: {motor_diag['kurtosis']:4.2f} (Norm=3.0) | Crest Factor: {motor_diag['crest_factor']:4.1f}",
                 f"                      Orders: 1x(Unbal)={motor_diag['e_1x_pct']:4.1f}% | 2x(Misalign)={motor_diag['e_2x_pct']:4.1f}%",
                 "------------------------------------------------------------------------------------------",

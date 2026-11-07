@@ -1,24 +1,24 @@
 # Project Status and Evidence Log
 
-**Status snapshot:** 7 November 2026. **Minor-project evaluation & presentation day.**
+**Status snapshot:** 7 November 2026. **Minor-project evaluation & demonstration.**
 
-This file records the verified empirical evidence, implemented stages, and hardware validation status across the entire project pipeline.
-
----
-
-## 1. Overview of Project Completion
-
-| Stage | Focus Area | Status | Key Evidence / Artifact |
-| :--- | :--- | :---: | :--- |
-| **Stage 1A & 1B** | Rotational Order & Vibration Physics | **VERIFIED** | `evidence/stage1b_csvs/` (CWRU & MAFAULDA matched records) |
-| **Stage 2** | Acoustic Source Localization & 2D Heatmap | **VERIFIED** | `evidence/stage2/` (25-point benchmark, 0.34° median error) |
-| **Stage 3** | ESP32 Hardware Acquisition & Dual-I2S | **VERIFIED** | `firmware/` (11,025 Hz 4-ch DMA on COM8 @ 921.6k baud) |
-| **Stage 4** | Real-Time Multimodal Sensor Fusion HUD | **VERIFIED** | `src/spatial_acoustic_radar_pro.py` (Golden Baseline engine) |
-| **Presentation** | Minor Project Review Slide Deck & Report | **READY** | `PRESENTATION_Spatial_Multimodal_EdgeAI.pptx` & Report |
+This document records the verified empirical evidence, implemented stages, and hardware validation status across the entire project pipeline with strict academic distinctions between physical prototype streaming, open-source dataset benchmarks, and simulation proofs.
 
 ---
 
-## 2. Preliminary CWRU Experiment (Stage 1)
+## 1. Overview of Project Completion & Evidence Tiers
+
+| Stage | Focus Area | Evidence Tier | Status | Key Evidence / Artifact |
+| :--- | :--- | :---: | :---: | :--- |
+| **Stage 1A & 1B** | Rotational Order & Vibration Physics | **Open Dataset** | **VERIFIED** | `evidence/stage1b_csvs/` (CWRU & MAFAULDA matched records) |
+| **Stage 2** | Acoustic Source Localization & 2D Heatmap | **Numerical Sim** | **VERIFIED** | `evidence/stage2/` (25-point benchmark, 0.34° median error) |
+| **Stage 3** | ESP32 Hardware Acquisition & Dual-I2S | **Physical Hardware**| **VERIFIED** | `stage3_esp32_firmware/` (11,025 Hz 4-ch DMA on COM8 @ 921.6k baud) |
+| **Stage 4** | Real-Time Multimodal Sensor Fusion HUD | **Live Demonstrator**| **VERIFIED** | `stage4_realtime_fusion_radar/` (Golden Baseline engine & GUI) |
+| **Presentation** | Minor Project Review Slide Deck & Report | **Documentation** | **READY** | `PRESENTATION_Spatial_Multimodal_EdgeAI.pptx` & Report |
+
+---
+
+## 2. Preliminary CWRU Experiment (Stage 1A)
 - Verified spectral feature extraction on healthy versus inner-race-bearing recordings (`97.mat`, `98.mat`, `105.mat`).
 - Resolved RPM metadata fallback for files without explicit header fields.
 - Evidence archive: `evidence/cwru_initial/cwru_initial_results.zip`.
@@ -38,6 +38,7 @@ This file records the verified empirical evidence, implemented stages, and hardw
 
 ## 4. Acoustic Source Localization Simulation Suite (Stage 2)
 - **Array Geometry:** 4-Microphone Uniform Linear Array spaced at $d = 20.32\text{ mm}$ ($60.96\text{ mm}$ total span), matching the physical breadboard aperture.
+- **Physical Observables:** For a 1D linear array, Direction of Arrival (DOA bearing angle $\theta \in [-90^\circ, +90^\circ]$) is the primary physical observable; 2D $(x,y)$ heatmaps represent radial backprojection along the steered angle.
 - **Pairwise GCC-PHAT TDOA Verification (Stage 2B):**
   * Sinc-interpolated cross-correlation evaluated across all 6 microphone pairs against analytical ground truth.
   * Maximum delay error observed: **$<0.19\ \mu\text{s}$** (less than $1/50\text{th}$ of a single audio sample at 16 kHz).
@@ -65,20 +66,23 @@ This file records the verified empirical evidence, implemented stages, and hardw
 
 ## 5. Physical Hardware Verification (Stage 3)
 - **Hardware Architecture:** Classic ESP32-WROOM-32 development board.
-- **Dual-I2S Acquisition:** Configured simultaneous I2S0 and I2S1 DMA capture sharing master bit clock (SCK = GPIO 18) and word select (WS = GPIO 21):
+- **Dual-I2S Clock Synchronization:** Configured simultaneous I2S0 (Master) and I2S1 (Slave) sharing master bit clock (SCK = GPIO 18) and word select (WS = GPIO 21):
   * Pair A (Mics 1 & 2): GPIO 19 (I2S0 SD)
   * Pair B (Mics 3 & 4): GPIO 23 (I2S1 SD)
   * ADXL345: I2C on TX2 (GPIO 17, SDA) and RX2 (GPIO 16, SCL)
   * FC-03 Tachometer: Hardware ISR on D4 (GPIO 4)
-- **Live Link Performance:** Streams 11,025 Hz 4-channel 16-bit PCM + ADXL345 + Tachometer pulses over 921,600 baud serial on COM8. Zero dropped packets observed under sustained continuous acquisition.
-- Firmware source: `firmware/ESP32_Spatial_Acoustic_Radar_Firmware/ESP32_Spatial_Acoustic_Radar_Firmware.ino`.
+- **Clock vs. DMA Queue Alignment:** Shared SCK/WS locks physical sampling clock (0 PPM drift). Sequential `i2s_read` pulls 128-sample DMA blocks. Sub-sample inter-peripheral buffer synchronization is planned for major project characterization.
+- **Sample Bit Shift:** Unpacking shifts INMP441 24-bit MSB-aligned data via `>> 16` directly into signed `int16_t` with unity digital gain.
+- **Live Link Performance:** Streams 11,025 Hz 4-channel 16-bit PCM + ADXL345 + Tachometer pulses over 921,600 baud serial on COM8 with 16-bit XOR checksum. Zero dropped packets observed under sustained continuous acquisition.
+- Firmware source: `stage3_esp32_firmware/ESP32_Spatial_Acoustic_Radar_Firmware/ESP32_Spatial_Acoustic_Radar_Firmware.ino`.
 
 ---
 
 ## 6. Real-Time Multimodal Sensor Fusion Suite (Stage 4)
-- Master application: `src/spatial_acoustic_radar_pro.py` (Desktop launcher: `RUN_LIVE_RADAR.bat`).
-- **Live 2D Thermal Heatmap:** Backprojects acoustic energy onto a $60 \times 60$ spatial grid at 20 FPS.
+- Master application: `stage4_realtime_fusion_radar/src/spatial_acoustic_radar_pro.py` (Desktop launcher: `RUN_LIVE_RADAR.bat`).
+- **Explicit Evidence Mode Tag:** Live HUD displays current execution mode (`LIVE 4-MIC ULA PHYSICAL HARDWARE (COM8)`, `SYNTHETIC 4-CH ARRAY SIMULATION`, or `LAPTOP INTERNAL MIC DEMO`).
+- **Live 2D Thermal Heatmap:** Backprojects acoustic energy onto a spatial grid at 20 FPS with Direction of Arrival (DOA $\theta$) focus.
 - **Dynamic VU Indicators:** Dedicated Left and Right flank intensity rails with square-root scaling and color alerts (Cyan $\to$ Amber $\to$ Red).
-- **ISO 10816 Vibration Severity:** Automated grading (Zone A Good, Zone B Permissible, Zone C Warning, Zone D Alarm).
+- **ISO 10816-Inspired Vibration Severity Index:** Empirical dynamic acceleration grading ($a_{\text{dyn}} = |a_{\text{mag}} - 1.0g|$): Zone A Good, Zone B Permissible, Zone C Warning, Zone D Alarm.
 - **Acoustic Kurtosis ($\kappa$) & Crest Factor:** Detects impulsive commutator sparking and bearing micro-impacts ($\kappa > 4.5$).
 - **Golden Baseline Differential Engine (Key `'B'`):** Captures reference healthy signature and alerts to real-time deltas ($\Delta\text{Vib}, \Delta\text{RPM}, \Delta\text{Kurt}, \Delta\text{RMS}$) with a continuous Composite Health Index bar ($0\text{--}100\%$).
