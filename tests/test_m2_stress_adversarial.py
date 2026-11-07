@@ -323,26 +323,49 @@ class TestM2AdversarialStress(unittest.TestCase):
     def test_vulnerability_batched_vibration_timestamps_non_monotonic(self):
         """
         [REMEDIATION VERIFICATION 3]
-        Verifies that when two or more packets are delivered together in a single
-        serial chunk, vibration timestamps in vib_ring progress strictly monotonically (dt > 0).
+        Verifies that when packets are delivered together in batched serial chunks
+        (tested across batches of 2, 10, and 50 packets), vibration timestamps in vib_ring
+        progress strictly monotonically without backward steps (negative_dt_count == 0, dt > 0),
+        and every sample interval matches 0.0025 s (+/- 10 us).
         """
-        src = ESP32MultimodalSource()
-        pkt1 = ESP32MultimodalSource.build_packet_v2(1, 11025, 128, self.accel_default, self.audio_default)
-        pkt2 = ESP32MultimodalSource.build_packet_v2(2, 11025, 128, self.accel_default, self.audio_default)
+        for n_pkts in [2, 10, 50]:
+            with self.subTest(batch_size=n_pkts):
+                src = ESP32MultimodalSource()
+                chunk = b"".join([
+                    ESP32MultimodalSource.build_packet_v2(
+                        seq=i,
+                        fs=11025,
+                        block_frames=128,
+                        accel_samples=self.accel_default,
+                        audio_data=self.audio_default
+                    )
+                    for i in range(n_pkts)
+                ])
 
-        # Deliver both packets in a single batch
-        src._parse_incoming_bytes(pkt1 + pkt2)
+                parsed = src._parse_incoming_bytes(chunk)
+                self.assertEqual(parsed, n_pkts, f"Expected to parse {n_pkts} packets, got {parsed}")
 
-        t, ax, ay, az = src.get_vibration_history(max_samples=20)
-        dt = np.diff(t)
-        negative_dt_count = int(np.sum(dt <= 0))
+                t, ax, ay, az = src.get_vibration_history(max_samples=n_pkts * 10)
+                expected_samples = n_pkts * len(self.accel_default)
+                self.assertEqual(len(t), expected_samples, f"Expected {expected_samples} samples, got {len(t)}")
 
-        self.assertEqual(
-            negative_dt_count, 0,
-            f"Non-monotonic vibration timestamps observed (negative dt count: {negative_dt_count}, min dt = {np.min(dt):.6f} s)"
-        )
-        self.assertGreater(len(t), 0)
-        self.assertTrue(np.all(dt > 0), f"All dt must be strictly positive, got min dt = {np.min(dt):.6f} s")
+                dt = np.diff(t)
+                negative_dt_count = int(np.sum(dt <= 0))
+                self.assertEqual(
+                    negative_dt_count, 0,
+                    f"Non-monotonic vibration timestamps observed in {n_pkts}-packet batch "
+                    f"(negative dt count: {negative_dt_count}, min dt = {np.min(dt):.6f} s)"
+                )
+                self.assertTrue(
+                    np.all(dt > 0),
+                    f"All dt must be strictly positive in {n_pkts}-packet batch, got min dt = {np.min(dt):.6f} s"
+                )
+
+                # Every sample interval within the batch must match 0.0025s +/- 10us (2.49ms to 2.51ms)
+                np.testing.assert_allclose(
+                    dt, 0.0025, atol=1e-5,
+                    err_msg=f"Sample intervals must match 0.0025 s (+/- 10 us) in {n_pkts}-packet batch"
+                )
 
 
 if __name__ == "__main__":

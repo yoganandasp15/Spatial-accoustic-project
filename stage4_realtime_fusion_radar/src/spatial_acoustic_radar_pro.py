@@ -1152,8 +1152,8 @@ class ESP32MultimodalSource(AudioSourceBase):
                     with self.vib_ring_lock:
                         if len(self.vib_ring_time) > 0:
                             last_t = self.vib_ring_time[-1]
-                            # If previous sample was recent (< 0.5s), enforce monotonic progression
-                            if abs(t_pkt - last_t) < 0.5:
+                            # If batch is advancing (t_pkt < last_t) or last sample was recent (< 0.5s in past), enforce monotonicity
+                            if (t_pkt - last_t) < 0.5:
                                 t_start = max(t_start, last_t + dt_vib)
                         for k in range(num_vib):
                             self.vib_ring_time.append(t_start + k * dt_vib)
