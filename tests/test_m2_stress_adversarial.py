@@ -259,17 +259,17 @@ class TestM2AdversarialStress(unittest.TestCase):
         self.assertEqual(src.packets_valid, 200)
 
     # -------------------------------------------------------------------------
-    # EMPIRICAL VULNERABILITY REPRODUCTIONS (CHALLENGER FINDINGS)
+    # REMEDIATION VERIFICATION (CHALLENGER FINDINGS RESOLVED)
     # -------------------------------------------------------------------------
 
     def test_vulnerability_corrupt_length_fields_causes_stream_hang(self):
         """
-        [EMPIRICAL DEFECT PROOF 1]
-        Proves that a single bit flip in length-determining header fields:
-        - block_frames (byte 9, e.g. 128 -> 32896, total_pkt_len = 263 KB)
-        - channels (byte 3, e.g. 4 -> 132, total_pkt_len = 33 KB)
-        inflates total_pkt_len and hangs the receiver, refusing to parse subsequent
-        valid packets until hundreds of packets arrive to fill the phantom buffer length.
+        [REMEDIATION VERIFICATION 1]
+        Verifies that single bit flips in length-determining header fields:
+        - block_frames (byte 9, e.g. 128 -> 32896)
+        - channels (byte 3, e.g. 4 -> 132)
+        are caught immediately by header boundary validation, preventing buffer inflation
+        and stream stalls. All subsequent valid packets must be parsed successfully.
         """
         valid_pkt = ESP32MultimodalSource.build_packet_v2(1, 11025, 128, self.accel_default, self.audio_default)
 
@@ -289,20 +289,22 @@ class TestM2AdversarialStress(unittest.TestCase):
                 p = ESP32MultimodalSource.build_packet_v2(i, 11025, 128, self.accel_default, self.audio_default)
                 src._parse_incoming_bytes(p)
 
-            # EMPIRICAL CHECK: The parser SHOULD have rejected the corrupted packet and parsed the valid packets.
-            # Due to the lack of header boundary validation, it parsed ZERO valid packets!
-            is_stalled = (src.packets_valid == 0 and len(src._rx_buf) > 20000)
-            self.assertTrue(
-                is_stalled,
-                f"Vulnerability confirmed on {test_name}: Parser stalled with rx_buf={len(src._rx_buf)} and valid_pkts={src.packets_valid}"
+            # REMEDIATION VERIFICATION: The parser must reject corrupted packet and parse all valid packets.
+            self.assertEqual(
+                src.packets_valid, num_subsequent,
+                f"Parser failed to parse valid packets after {test_name}: got {src.packets_valid}, expected {num_subsequent}"
+            )
+            self.assertEqual(
+                len(src._rx_buf), 0,
+                f"Parser failed to drain buffer after {test_name}: remaining bytes {len(src._rx_buf)}"
             )
 
     def test_vulnerability_malformed_channels_crashes_with_value_error(self):
         """
-        [EMPIRICAL DEFECT PROOF 2]
-        Proves that if a packet with channels != 4 arrives with a valid checksum,
-        the receiver crashes with ValueError: could not broadcast input array,
-        which in production terminates the serial worker thread.
+        [REMEDIATION VERIFICATION 2]
+        Verifies that if a packet with channels != 4 arrives with a valid checksum,
+        the receiver rejects or safely ignores it without raising ValueError, ensuring
+        the background serial worker thread remains alive.
         """
         src = ESP32MultimodalSource()
         header = struct.pack("<BBBBHHHBBI", 0xAA, 0x55, 0x05, 2, 1, 11025, 128, 0, 0, 0)
@@ -311,15 +313,18 @@ class TestM2AdversarialStress(unittest.TestCase):
         chk = compute_packet_checksum(data)
         pkt = data + struct.pack("<H", chk)
 
-        with self.assertRaises(ValueError) as ctx:
-            src._parse_incoming_bytes(pkt)
-        self.assertIn("could not broadcast input array", str(ctx.exception))
+        try:
+            parsed = src._parse_incoming_bytes(pkt)
+            self.assertEqual(parsed, 0, "Malformed packet with channels != 4 must not yield valid packet")
+            self.assertEqual(src.packets_valid, 0)
+        except ValueError as e:
+            self.fail(f"Receiver raised ValueError on malformed channels: {e}")
 
     def test_vulnerability_batched_vibration_timestamps_non_monotonic(self):
         """
-        [EMPIRICAL DEFECT PROOF 3]
-        Proves that when two or more packets are delivered together in a single
-        serial chunk, the vibration timestamps in vib_ring jump backwards in time (dt < 0).
+        [REMEDIATION VERIFICATION 3]
+        Verifies that when two or more packets are delivered together in a single
+        serial chunk, vibration timestamps in vib_ring progress strictly monotonically (dt > 0).
         """
         src = ESP32MultimodalSource()
         pkt1 = ESP32MultimodalSource.build_packet_v2(1, 11025, 128, self.accel_default, self.audio_default)
@@ -332,10 +337,12 @@ class TestM2AdversarialStress(unittest.TestCase):
         dt = np.diff(t)
         negative_dt_count = int(np.sum(dt <= 0))
 
-        self.assertGreater(
+        self.assertEqual(
             negative_dt_count, 0,
-            f"Vulnerability confirmed: Non-monotonic vibration timestamps observed (min dt = {np.min(dt):.6f} s)"
+            f"Non-monotonic vibration timestamps observed (negative dt count: {negative_dt_count}, min dt = {np.min(dt):.6f} s)"
         )
+        self.assertGreater(len(t), 0)
+        self.assertTrue(np.all(dt > 0), f"All dt must be strictly positive, got min dt = {np.min(dt):.6f} s")
 
 
 if __name__ == "__main__":

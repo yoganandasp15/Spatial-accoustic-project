@@ -1107,6 +1107,12 @@ class ESP32MultimodalSource(AudioSourceBase):
                     HEADER_FORMAT_V2, buf, 0
                 )
 
+                # Defensive sanity check: enforce interface contract bounds before calculating total_pkt_len
+                if channels != 4 or block_frames != 128 or num_vib > 32:
+                    # Corrupted or false sync: advance past sync and continue scanning
+                    del buf[:2]
+                    continue
+
                 vib_len = num_vib * 6
                 audio_len = block_frames * channels * 2
                 total_pkt_len = HEADER_SIZE_V2 + vib_len + audio_len + 2
@@ -1144,6 +1150,11 @@ class ESP32MultimodalSource(AudioSourceBase):
                     dt_vib = 1.0 / 400.0
                     t_start = t_pkt - (num_vib - 1) * dt_vib
                     with self.vib_ring_lock:
+                        if len(self.vib_ring_time) > 0:
+                            last_t = self.vib_ring_time[-1]
+                            # If previous sample was recent (< 0.5s), enforce monotonic progression
+                            if abs(t_pkt - last_t) < 0.5:
+                                t_start = max(t_start, last_t + dt_vib)
                         for k in range(num_vib):
                             self.vib_ring_time.append(t_start + k * dt_vib)
                             self.vib_ring_ax.append(float(raw_vib[k, 0]))
@@ -1160,8 +1171,9 @@ class ESP32MultimodalSource(AudioSourceBase):
                 active_channels = sum(1 for r in rms_ch if r > 0.0003)
 
                 with self.lock:
-                    self.buffer = np.roll(self.buffer, -block_frames, axis=0)
-                    self.buffer[-block_frames:, :] = samples
+                    if samples.shape == (block_frames, self.channels):
+                        self.buffer = np.roll(self.buffer, -block_frames, axis=0)
+                        self.buffer[-block_frames:, :] = samples
                     self.fs = float(fs_val)
 
                     now = time.time()
@@ -1247,8 +1259,9 @@ class ESP32MultimodalSource(AudioSourceBase):
                 active_channels = sum(1 for r in rms_ch if r > 0.0003)
 
                 with self.lock:
-                    self.buffer = np.roll(self.buffer, -block_frames, axis=0)
-                    self.buffer[-block_frames:, :] = samples
+                    if samples.shape == (block_frames, self.channels):
+                        self.buffer = np.roll(self.buffer, -block_frames, axis=0)
+                        self.buffer[-block_frames:, :] = samples
                     self.fs = float(fs_val)
 
                     now = time.time()
