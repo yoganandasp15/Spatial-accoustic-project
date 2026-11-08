@@ -38,7 +38,7 @@ for p in [
         sys.path.insert(0, p)
 
 # Import local order tracking and phase calibration modules
-from order_tracking import compute_order_tracking
+from order_tracking import compute_order_tracking, extract_tachometer_revolutions
 from calibrate_i2s_phase import gcc_phat, load_wav_multichannel
 
 
@@ -66,23 +66,24 @@ def apply_pair_phase_compensation(
     """
     Applies exact frequency-domain fractional delay phase compensation to Pair B (channels 2 & 3):
     H(f) = exp(-j * 2 * pi * f * comp_delay_sec)
+    Uses symmetric edge-padding to eliminate boundary step transients.
     """
     if abs(comp_delay_sec) < 1e-12:
         return audio_4ch.copy()
         
     n_samples, n_channels = audio_4ch.shape
     n_pad = 128
-    n_fft = n_samples + n_pad
+    n_fft = n_samples + 2 * n_pad
     freqs = np.fft.rfftfreq(n_fft, d=1.0 / fs)
     phase_shift = np.exp(-2j * np.pi * freqs * comp_delay_sec)
     
     aligned = audio_4ch.copy()
     for ch in [2, 3]:
         if ch < n_channels:
-            padded = np.pad(audio_4ch[:, ch], (0, n_pad), mode="constant")
+            padded = np.pad(audio_4ch[:, ch], (n_pad, n_pad), mode="edge")
             ch_fft = np.fft.rfft(padded, n=n_fft)
             compensated = np.fft.irfft(ch_fft * phase_shift, n=n_fft)
-            aligned[:, ch] = compensated[:n_samples]
+            aligned[:, ch] = compensated[n_pad : n_pad + n_samples]
             
     return aligned
 

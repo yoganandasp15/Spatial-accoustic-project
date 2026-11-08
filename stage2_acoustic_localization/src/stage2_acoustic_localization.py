@@ -395,7 +395,7 @@ def run_stage2_evaluation():
     ranges_target = np.random.uniform(0.65, 2.10, size=25)
     
     benchmark_records = []
-    representative_heatmaps = []
+    rep_heatmaps_dict = {}
     
     for idx, (ang_deg, rng_m) in enumerate(zip(angles_target, ranges_target)):
         ang_rad = np.radians(ang_deg)
@@ -429,7 +429,10 @@ def run_stage2_evaluation():
         
         # Capture 4 key representative cases for multi-panel heatmap figure
         if idx in [2, 12, 22, 17]:
-            representative_heatmaps.append((true_pos, est_pos, heatmap, ang_deg, est_bearing_deg))
+            rep_heatmaps_dict[idx] = (true_pos, est_pos, heatmap, ang_deg, est_bearing_deg)
+
+    # Order explicitly matching titles: Case A (idx 2), Case B (idx 12), Case C (idx 22), Case D (idx 17)
+    representative_heatmaps = [rep_heatmaps_dict[k] for k in [2, 12, 22, 17] if k in rep_heatmaps_dict]
 
     # Save benchmark CSV
     csv_path_bench = os.path.join(EVIDENCE_DIR, "stage2_localization_benchmarks.csv")

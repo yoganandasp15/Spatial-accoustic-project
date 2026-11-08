@@ -264,6 +264,34 @@ def plot_order_tracking_results(ot_res: dict, output_png: str) -> None:
     plt.close()
 
 
+def plot_unavailable_order_tracking(t: np.ndarray, vibration: np.ndarray, output_png: str):
+    """Generates a truthful diagnostic plot when tachometer pulses are absent."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    ax1 = axes[0]
+    ax1.plot(t * 1000.0, vibration, color='#2b5c8f', lw=1.2)
+    ax1.set_title("Classical Time-Domain Vibration a(t) [Tachometer Absent]", fontsize=11, fontweight='bold')
+    ax1.set_xlabel("Time (milliseconds)", fontsize=9)
+    ax1.set_ylabel("Acceleration (g)", fontsize=9)
+    ax1.grid(True, alpha=0.3)
+
+    ax2 = axes[1]
+    N = len(vibration)
+    if N >= 8:
+        dt = float(np.mean(np.diff(t))) if len(t) > 1 else 0.0025
+        w = np.hanning(N)
+        fft_v = np.fft.rfft((vibration - np.mean(vibration)) * w) * (2.0 / np.sum(w))
+        freqs = np.fft.rfftfreq(N, d=dt)
+        ax2.plot(freqs, np.abs(fft_v), color='#d9534f', lw=1.4)
+    ax2.set_title("Raw Frequency Spectrum (Rotational Orders Unavailable)", fontsize=11, fontweight='bold')
+    ax2.set_xlabel("Frequency (Hz)", fontsize=9)
+    ax2.set_ylabel("Linear Amplitude (g)", fontsize=9)
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_png, dpi=200)
+    plt.close()
+
+
 def run_order_tracking_on_csv(csv_path: str, output_dir: str) -> dict:
     """Executes order tracking on a MAFAULDA or burst CSV vibration record."""
     if not os.path.exists(csv_path):
@@ -334,6 +362,11 @@ def run_order_tracking_on_csv(csv_path: str, output_dir: str) -> dict:
         with open(output_json, 'w') as f:
             json.dump(metrics, f, indent=2)
         print(f"[+] Order metrics JSON saved: {output_json}")
+
+        output_png = os.path.join(output_dir, "order_tracking_spectrum.png")
+        plot_unavailable_order_tracking(t, vibration, output_png)
+        print(f"[+] Order tracking plot saved: {output_png}")
+
         print("\n" + "="*75)
         print(" ROTATIONAL ORDER TRACKING REPORT: RPM UNAVAILABLE (NO TACHOMETER SIGNAL)")
         print("   Shaft Speed     : UNAVAILABLE")

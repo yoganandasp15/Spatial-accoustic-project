@@ -13,5 +13,5 @@ Overcome the lack of TDM (Time Division Multiplexing) in the classic ESP32-WROOM
 
 ## Streaming Protocol
 * **Sampling Rate:** 11,025 Hz, 4 channels, 16-bit PCM.
-* **Serial Link:** COM8 @ 921,600 baud (79.4 kB/s throughput).
+* **Serial Link:** COM8 @ 1,152,000 baud (92.3 kB/s throughput with 24.7% bandwidth headroom).
 * **Integrity:** 16-bit XOR packet checksum. Zero packet loss verified under continuous acquisition.

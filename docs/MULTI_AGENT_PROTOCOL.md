@@ -41,13 +41,13 @@ git push origin main
 ---
 
 ## 🛡️ 4. Core Engineering Invariants
-* **Hardware Pinout Invariant (Classic ESP32 COM8 @ 921,600 baud):**
+* **Hardware Pinout Invariant (Classic ESP32 COM8 @ 1,152,000 baud):**
   * I2S Master SCK = GPIO 18, WS = GPIO 21.
   * Pair A Audio = GPIO 19 (I2S0 SD). Pair B Audio = GPIO 23 (I2S1 SD).
-  * ADXL345 I2C = SDA TX2 (GPIO 17), SCL RX2 (GPIO 16).
-  * FC-03 Tachometer ISR = D4 (GPIO 4).
+  * ADXL345 I2C = SDA TX2 (GPIO 17), SCL RX2 (GPIO 16) with 400 Hz Stream FIFO.
+  * FC-03 Tachometer ISR = D4 (GPIO 4) with 2500 µs refractory debounce.
 * **Audio Bit-Shift Invariant:** INMP441 24-bit audio in 32-bit slot must be shifted `>> 16` directly into signed `int16_t` (never `>> 14`).
 * **Evidence Separation Invariant:**
   * Machine Fault Ground Truth: MAFAULDA (10g unbalance $1\times$ surge) & CWRU datasets.
   * Acoustic Localization Ground Truth: Stage 2 25-point off-grid simulation ($0.34^\circ$ median error).
-  * Hardware Prototype Ground Truth: Classic ESP32 streaming on COM8 @ 921,600 baud.
+  * Hardware Prototype Ground Truth: Classic ESP32 streaming on COM8 @ 1,152,000 baud (Type 0x05 binary protocol).

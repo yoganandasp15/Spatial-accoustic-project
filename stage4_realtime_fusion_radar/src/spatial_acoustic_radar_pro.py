@@ -76,23 +76,24 @@ def apply_pair_phase_compensation(
     """
     Applies exact frequency-domain fractional delay phase compensation to Pair B (channels 2 & 3):
     H(f) = exp(-j * 2 * pi * f * comp_delay_sec)
+    Uses symmetric edge-padding to eliminate boundary step transients.
     """
     if abs(comp_delay_sec) < 1e-12 or audio_4ch.shape[1] < 4:
         return audio_4ch.copy()
         
     n_samples, n_channels = audio_4ch.shape
     n_pad = 128
-    n_fft = n_samples + n_pad
+    n_fft = n_samples + 2 * n_pad
     freqs = np.fft.rfftfreq(n_fft, d=1.0 / fs)
     phase_shift = np.exp(-2j * np.pi * freqs * comp_delay_sec)
     
     aligned = audio_4ch.copy()
     for ch in [2, 3]:
         if ch < n_channels:
-            padded = np.pad(audio_4ch[:, ch], (0, n_pad), mode="constant")
+            padded = np.pad(audio_4ch[:, ch], (n_pad, n_pad), mode="edge")
             ch_fft = np.fft.rfft(padded, n=n_fft)
             compensated = np.fft.irfft(ch_fft * phase_shift, n=n_fft)
-            aligned[:, ch] = compensated[:n_samples]
+            aligned[:, ch] = compensated[n_pad : n_pad + n_samples]
             
     return aligned
 
@@ -816,10 +817,12 @@ class MultimodalMotorEngine:
             dyn_ay_arr = ay_arr - self.grav_y
             dyn_az_arr = az_arr - self.grav_z
 
-            # Signed dynamic vibration on primary radial/transverse axis for order tracking
-            signed_vib_series = dyn_ax_arr
-            dyn_mag_arr = np.sqrt(dyn_ax_arr**2 + dyn_ay_arr**2 + dyn_az_arr**2)
-            dyn_g = float(dyn_mag_arr[-1])
+            # Robust RMS dynamic vibration magnitude across window (eliminates point-sample flicker)
+            dyn_mag_sq = dyn_ax_arr**2 + dyn_ay_arr**2 + dyn_az_arr**2
+            dyn_g = float(np.sqrt(np.mean(dyn_mag_sq)))
+
+            # 3-Axis Signed Vibration Components for Orientation-Invariant Order Tracking
+            dyn_axes = [dyn_ax_arr, dyn_ay_arr, dyn_az_arr]
 
             # Effective vibration sampling rate from hardware timestamps
             dt_span = float(t_vib[-1] - t_vib[0])
@@ -836,13 +839,26 @@ class MultimodalMotorEngine:
             dyn_ay = ay_g - self.grav_y
             dyn_az = az_g - self.grav_z
 
-            dyn_g = math.sqrt(dyn_ax**2 + dyn_ay**2 + dyn_az**2)
-            self.vib_history.append(dyn_g)
+            dyn_pt = math.sqrt(dyn_ax**2 + dyn_ay**2 + dyn_az**2)
+            self.vib_history.append(dyn_pt)
             self.vib_signed_history.append(dyn_ax)
+            if not hasattr(self, "vib_signed_y_history"):
+                self.vib_signed_y_history = []
+                self.vib_signed_z_history = []
+            self.vib_signed_y_history.append(dyn_ay)
+            self.vib_signed_z_history.append(dyn_az)
             if len(self.vib_history) > 256:
                 self.vib_history.pop(0)
+                self.vib_signed_history.pop(0)
+                self.vib_signed_y_history.pop(0)
+                self.vib_signed_z_history.pop(0)
 
-            signed_vib_series = np.array(self.vib_signed_history, dtype=np.float64)
+            dyn_g = float(np.sqrt(np.mean(np.array(self.vib_history)**2)))
+            dyn_axes = [
+                np.array(self.vib_signed_history, dtype=np.float64),
+                np.array(self.vib_signed_y_history, dtype=np.float64),
+                np.array(self.vib_signed_z_history, dtype=np.float64)
+            ]
             fs_vib = 86.13
 
         # Vibration severity grading (Project Dynamic Vibration Severity Index inspired by ISO vibration zones)
@@ -863,20 +879,24 @@ class MultimodalMotorEngine:
             iso_color = "#ff0055"
             vib_penalty = 50.0 + min(35.0, (dyn_g - 0.70) * 40.0)
 
-        # 2. Rotational Order Analysis from SIGNED Dynamic Vibration (NOT Rectified Euclidean Magnitude!)
+        # 2. Rotational Order Analysis from Multi-Axis Power Spectrum (Orientation Invariant, No Rectification Doubling)
         f0 = max(1.0, rpm / 60.0)
-        if len(signed_vib_series) >= 32 and rpm > 60.0:
-            vib_arr = np.array(signed_vib_series, dtype=np.float64)
-            vib_arr -= np.mean(vib_arr)
-            n_fft = max(256, len(vib_arr) * 4)  # Zero-padding for ~0.08 Hz bin spacing
-            vib_spec = np.abs(np.fft.rfft(vib_arr, n=n_fft))
+        n_samples_vib = len(dyn_axes[0])
+        if n_samples_vib >= 32 and rpm > 60.0:
+            n_fft = max(256, n_samples_vib * 4)  # Zero-padding for ~0.08 Hz bin spacing
             vib_freqs = np.fft.rfftfreq(n_fft, d=1.0 / fs_vib)
+            # Sum power spectra of each signed axis: P(f) = |X(f)|^2 + |Y(f)|^2 + |Z(f)|^2
+            vib_power_spec = np.zeros_like(vib_freqs, dtype=np.float64)
+            for axis_sig in dyn_axes:
+                axis_ac = np.array(axis_sig, dtype=np.float64)
+                axis_ac -= np.mean(axis_ac)
+                vib_power_spec += np.abs(np.fft.rfft(axis_ac, n=n_fft)) ** 2
 
             def get_order_energy(target_f, bandwidth=1.5):
                 mask = (vib_freqs >= max(0.5, target_f - bandwidth)) & (vib_freqs <= target_f + bandwidth)
-                return float(np.sum(vib_spec[mask]**2)) if np.any(mask) else 0.0
+                return float(np.sum(vib_power_spec[mask])) if np.any(mask) else 0.0
 
-            tot_vib_energy = float(np.sum(vib_spec**2)) + 1e-15
+            tot_vib_energy = float(np.sum(vib_power_spec)) + 1e-15
             e_1x = get_order_energy(f0) / tot_vib_energy
             e_2x = get_order_energy(2.0 * f0) / tot_vib_energy
             e_3x = get_order_energy(3.0 * f0) / tot_vib_energy
@@ -884,6 +904,25 @@ class MultimodalMotorEngine:
             e_1x = 0.0
             e_2x = 0.0
             e_3x = 0.0
+
+        # True ISO 10816/20816 Vibration Velocity RMS (mm/s) via Omega-Arithmetic Integration
+        # V(f) = (A(f) * 9806.65) / (2 * pi * f) for f in [10 Hz, 200 Hz]
+        v_rms_mms = 0.0
+        if n_samples_vib >= 16:
+            n_vfft = max(128, n_samples_vib)
+            v_freqs = np.fft.rfftfreq(n_vfft, d=1.0 / fs_vib)
+            iso_band = (v_freqs >= 10.0) & (v_freqs <= min(200.0, fs_vib / 2.0))
+            if np.any(iso_band):
+                v_axis_rms_sq = 0.0
+                for axis_sig in dyn_axes:
+                    ax_data = np.array(axis_sig, dtype=np.float64)
+                    ax_data -= np.mean(ax_data)
+                    w_v = np.hanning(len(ax_data))
+                    A_f = np.abs(np.fft.rfft(ax_data * w_v, n=n_vfft)) * (2.0 / (np.sum(w_v) + 1e-12))
+                    V_f = np.zeros_like(A_f)
+                    V_f[iso_band] = (A_f[iso_band] * 9806.65) / (2.0 * np.pi * v_freqs[iso_band])
+                    v_axis_rms_sq += float(np.sum(V_f[iso_band]**2)) / 2.0
+                v_rms_mms = float(np.sqrt(v_axis_rms_sq))
 
         # Acoustic spectrum for high-frequency acoustic baseline comparison
         spec = np.abs(np.fft.rfft(x))
@@ -945,6 +984,7 @@ class MultimodalMotorEngine:
             "rpm_jitter": rpm_jitter,
             "f0_hz": f0,
             "dyn_vib_g": dyn_g,
+            "v_rms_mms": v_rms_mms,
             "iso_severity": iso_severity,
             "iso_color": iso_color,
             "crest_factor": crest,
@@ -1205,7 +1245,7 @@ class ESP32MultimodalSource(AudioSourceBase):
                 )
 
                 # Defensive sanity check: enforce interface contract bounds before calculating total_pkt_len
-                if channels != 4 or block_frames != 128 or num_vib > 32:
+                if channels != 4 or block_frames != 128 or num_vib > 32 or fs_val < 1000 or fs_val > 96000:
                     # Corrupted or false sync: advance past sync and continue scanning
                     del buf[:2]
                     continue
@@ -1308,6 +1348,11 @@ class ESP32MultimodalSource(AudioSourceBase):
                 sync1, sync2, ptype, channels, seq, fs_val, block_frames, ax_mg, ay_mg, az_mg, pulses = struct.unpack_from(
                     HEADER_FORMAT_V1, buf, 0
                 )
+
+                # Defensive sanity check on legacy 0x04 packet bounds
+                if channels != 4 or block_frames != 128 or fs_val < 1000 or fs_val > 96000:
+                    del buf[:2]
+                    continue
 
                 audio_len = block_frames * channels * 2
                 total_pkt_len = HEADER_SIZE_V1 + audio_len + 2
@@ -1501,19 +1546,18 @@ class Synthetic4ChSource(AudioSourceBase):
         d_pitch = 0.02032
         mic_x = np.array([-1.5, -0.5, +0.5, +1.5]) * d_pitch
 
-        # Multi-harmonic rotating machinery audio signature
-        base = (
-            0.60 * np.sin(2 * np.pi * 1200.0 * t)
-            + 0.25 * np.sin(2 * np.pi * 2400.0 * t)
-            + 0.10 * np.sin(2 * np.pi * 3600.0 * t)
-            + 0.03 * np.random.randn(self.frame_len)
-        ).astype(np.float32)
-
+        # Multi-harmonic rotating machinery audio signature with exact continuous sub-sample delays
         out = np.zeros((self.frame_len, 4), dtype=np.float32)
         for i in range(4):
             delay_s = (mic_x[i] * np.sin(angle_rad)) / SPEED_OF_SOUND
-            delay_samp = int(round(delay_s * self.fs))
-            out[:, i] = np.roll(base, delay_samp)
+            t_i = t + delay_s
+            sig_i = (
+                0.60 * np.sin(2 * np.pi * 1200.0 * t_i)
+                + 0.25 * np.sin(2 * np.pi * 2400.0 * t_i)
+                + 0.10 * np.sin(2 * np.pi * 3600.0 * t_i)
+                + 0.03 * np.random.randn(self.frame_len)
+            ).astype(np.float32)
+            out[:, i] = sig_i
 
         self.pulses += int(np.random.randint(1, 4))
         return out
@@ -2259,20 +2303,19 @@ class AcousticRadarApp:
             ax_g = float(telemetry.get("ax_g", 0.0))
             ay_g = float(telemetry.get("ay_g", 0.0))
             az_g = float(telemetry.get("az_g", -0.82))
-            total_g = math.sqrt(ax_g**2 + ay_g**2 + az_g**2)
-            dyn_vib_g = max(0.0, total_g - 1.0)
             pulses = int(telemetry.get("rpm_pulses", 0))
             raw_rpm = float(telemetry.get("estimated_rpm", 0.0))
             rpm = raw_rpm / max(1, self.pulses_per_rev)
             fw_mode = str(telemetry.get("firmware_mode", "N/A"))
             hw_alive = bool(telemetry.get("is_hardware_alive", False))
 
+            vib_hist = self.current_source.get_vibration_history(max_samples=512)
+            motor_diag = self.motor_engine.analyze(raw_frame, fs, ax_g, ay_g, az_g, rpm, vib_history=vib_hist)
+            dyn_vib_g = float(motor_diag.get("dyn_vib_g", 0.0))
+
             if self.learn_baseline_requested:
                 self.motor_engine.learn_baseline(rpm, dyn_vib_g, raw_frame, fs)
                 self.learn_baseline_requested = False
-
-            vib_hist = self.current_source.get_vibration_history(max_samples=512)
-            motor_diag = self.motor_engine.analyze(raw_frame, fs, ax_g, ay_g, az_g, rpm, vib_history=vib_hist)
 
             dir_str = "CENTER" if abs(target_angle) < 6.0 else ("RIGHT" if target_angle > 0 else "LEFT")
             lock_badge = f"* LOCKED ({dir_str})" if is_locked else "SEARCHING / SCANNING..."
@@ -2325,8 +2368,8 @@ class AcousticRadarApp:
                 "------------------------------------------------------------------------------------------",
                 f" [S1: FC-03 TACH]     Speed: {rpm:6.1f} RPM (f0 = {motor_diag['f0_hz']:4.1f} Hz) | Jitter: ±{motor_diag['rpm_jitter']:3.1f} RPM",
                 f"                      Total: {pulses:6d} Pulses | PPR: {self.pulses_per_rev} (Key 'P' to cycle)",
-                f" [S2: ADXL345 3-AXIS] Dyn Vib: {dyn_vib_g:4.3f}g (Gravity-Decoupled) | Raw: [X:{ax_g:+5.2f}, Y:{ay_g:+5.2f}, Z:{az_g:+5.2f}]",
-                f"                      Severity Index: {motor_diag['iso_severity']}",
+                f" [S2: ADXL345 3-AXIS] Dyn Vib: {dyn_vib_g:4.3f}g | ISO Vel: {motor_diag.get('v_rms_mms', 0.0):4.2f} mm/s (ω-Int) | Raw: [X:{ax_g:+5.2f}, Y:{ay_g:+5.2f}, Z:{az_g:+5.2f}]",
+                f"                      Severity: {motor_diag['iso_severity']}",
                 f" [S3: ACOUSTIC EMIT]  Kurtosis: {motor_diag['kurtosis']:4.2f} (Norm=3.0) | Crest Factor: {motor_diag['crest_factor']:4.1f}",
                 f" [S4: VIB HARMONICS]  1x(Unbalance)={motor_diag['e_1x_pct']:4.1f}% | 2x(Misalignment)={motor_diag['e_2x_pct']:4.1f}%",
                 "------------------------------------------------------------------------------------------",

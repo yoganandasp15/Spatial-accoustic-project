@@ -74,13 +74,19 @@ static int32_t dma_rx1[CHUNK_FRAMES * 2];
 
 // Telemetry state
 volatile uint32_t tach_pulse_count = 0;
+volatile int64_t last_tach_isr_us = 0;
+#define TACH_DEBOUNCE_US 2500  // Refractory debounce window (max 24,000 RPM for 1-slot disc)
 bool adxl_present = false;
 bool continuous_streaming = true;
 uint16_t packet_seq = 0;
 uint32_t last_ascii_time = 0;
 
 void IRAM_ATTR fc03_isr() {
-    tach_pulse_count++;
+    int64_t now_us = esp_timer_get_time();
+    if (now_us - last_tach_isr_us >= TACH_DEBOUNCE_US) {
+        tach_pulse_count++;
+        last_tach_isr_us = now_us;
+    }
 }
 
 bool init_adxl345() {
@@ -243,9 +249,18 @@ void init_dual_i2s_4mic() {
 
     i2s_zero_dma_buffer(I2S_NUM_0);
     i2s_zero_dma_buffer(I2S_NUM_1);
+
+    // 4. Drain initial startup DMA blocks in lockstep to flush transient initialization skew
+    size_t dummy_bytes = 0;
+    for (int k = 0; k < 4; k++) {
+        i2s_read(I2S_NUM_0, dma_rx0, sizeof(dma_rx0), &dummy_bytes, pdMS_TO_TICKS(20));
+        i2s_read(I2S_NUM_1, dma_rx1, sizeof(dma_rx1), &dummy_bytes, pdMS_TO_TICKS(20));
+    }
 }
 
 void setup() {
+    // Expand hardware UART TX ring buffer to 4096 bytes so 1072-byte packets transmit non-blocking
+    Serial.setTxBufferSize(4096);
     Serial.begin(SERIAL_BAUD);
     delay(400);
 

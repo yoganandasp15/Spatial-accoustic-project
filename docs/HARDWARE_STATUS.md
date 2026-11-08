@@ -1,14 +1,14 @@
 # Hardware Status & Verified Wiring Specification
 
-**Status:** Physical hardware prototype assembled on breadboard, flashed, and verified live on **COM8 @ 921,600 baud**.
+**Status:** Physical hardware prototype assembled on breadboard, flashed, and verified live on **COM8 @ 1,152,000 baud** (Type 0x05 Binary Protocol with 400 Hz ADXL345 Stream FIFO).
 
 ---
 
 ## 1. Physical Hardware Components
 * **MCU Board:** Classic ESP32 DevKit (ESP32-WROOM-32, 38-pin / 30-pin layout, dual-core @ 240 MHz).
 * **Acoustic Array:** 4x INMP441 MEMS digital microphones configured in a Uniform Linear Array (ULA) spaced at $d = 20.32\text{ mm}$ (8 breadboard slots, total aperture $60.96\text{ mm}$).
-* **Vibration Sensor:** ADXL345 3-axis digital accelerometer breakout configured in I2C mode.
-* **Tachometer:** FC-03 slotted optical interrupter module (3.3V supply, digital pulse output).
+* **Vibration Sensor:** ADXL345 3-axis digital accelerometer breakout configured in I2C mode with 400 Hz Stream FIFO.
+* **Tachometer:** FC-03 slotted optical interrupter module (3.3V supply, digital pulse output with 2500 µs ISR refractory debounce).
 * **Motor Under Test:** Safe, low-voltage small DC motor with optical encoder disc.
 
 ---
@@ -24,7 +24,8 @@
 | **Mic 4** | Row 44 ($x = +30.48\text{ mm}$) | Pair B (Right) | GPIO 18 | GPIO 21 | GPIO 23 (I2S1) | 3.3V | 3.3V / GND |
 
 * **Hardware Clock Synchronization Invariant:** Although the classic ESP32 lacks hardware TDM, configuring I2S0 (Master) and I2S1 (Slave) with shared bit-clock (GPIO 18) and word-select (GPIO 21) guarantees identical sampling frequencies across all 4 channels (0 PPM drift).
-* **DMA Alignment Note:** Sequential `i2s_read` calls pull 128-frame DMA blocks from each peripheral. Hardware clocking ensures identical sample rates; inter-DMA descriptor sample queue alignment is maintained within DMA block boundaries, with sub-sample cross-peripheral chirp calibration documented as a future enhancement.
+* **Historical Evolution of SCK Pinout (GPIO 18 vs GPIO 22):** In early experimental bringup (`dual_i2s_4mic/ESP32_Classic_4Mic_DualI2S.ino`), I2S0 drove GPIO 22 (BCLK) and GPIO 21 (WS), requiring physical loopback jumpers from GPIO 22 to GPIO 18 and GPIO 21 to GPIO 5. In the unified production firmware (`ESP32_Spatial_Acoustic_Radar_Firmware.ino`), the bus is simplified directly: I2S0 drives physical SCK on GPIO 18 and WS on GPIO 21, and the GPIO MUX input buffer (`PIN_INPUT_ENABLE`) is enabled directly on GPIO 18 and 21 pads so I2S1 receives the master clocks without external loopback jumpers.
+* **DMA Alignment & Startup Flushing:** At startup, both I2S peripherals drain and discard 4 DMA blocks in lockstep before entering the streaming loop, eliminating initial startup transient skew.
 
 ### 2.2 ADXL345 3-Axis Accelerometer (I2C Bus)
 * **VCC:** 3.3V (ESP32 3V3 rail)
@@ -33,24 +34,28 @@
 * **SCL:** RX2 (GPIO 16)
 * **CS:** Tied to 3.3V (enables I2C mode)
 * **SDO:** Tied to GND (sets I2C address to `0x53`)
-* **Verified Sensor State:** Readout confirmed `DEVID = 0xE5`, static gravity $a_z \approx -0.82g$.
+* **Verified Sensor State:** Readout confirmed `DEVID = 0xE5`, configured in 400 Hz ODR Stream FIFO mode (`BW_RATE = 0x0C`, `FIFO_CTL = 0x80`).
 
 ### 2.3 FC-03 Optical Tachometer
 * **VCC:** 3.3V
 * **GND:** Ground
-* **DO (Digital Out):** D4 (GPIO 4) configured with `RISING` hardware interrupt service routine (`fc03_isr`).
+* **DO (Digital Out):** D4 (GPIO 4) configured with `RISING` hardware interrupt service routine (`fc03_isr`) with 2500 µs refractory debounce filter against LM393 comparator chatter.
 * **AO (Analog Out):** Unconnected / Not needed.
 
 ---
 
 ## 3. Communication Link & Streaming Protocol
 * **Serial Port:** COM8
-* **Baud Rate:** 921,600 baud (8-N-1, raw link limit $92,160\text{ bytes/s}$)
+* **Baud Rate:** 1,152,000 baud (8-N-1, raw link limit $115,200\text{ bytes/s}$, providing $24.7\%$ bandwidth headroom).
 * **Audio Format:** 11,025 Hz, 4 channels, 16-bit signed PCM (unpacked from INMP441 24-bit MSB-aligned slot via `>> 16`).
 * **Frame Chunk Size:** 128 samples per block (11.61 ms packet interval, 86.13 packets/sec).
-* **Packet Structure:** 20-byte `PacketHeader` + 1024-byte audio chunk (128 frames x 4 ch x 2 bytes) + 2-byte 16-bit XOR checksum = 1,046 bytes per packet.
-* **Streaming Throughput:** $86.1328\text{ pkt/s} \times 1,046\text{ B/pkt} = 90,095\text{ B/s} = 90.10\text{ kB/s}$ ($97.76\%$ link utilization).
-* **Packet Integrity & Validation:** 16-bit XOR checksum computed across header and audio payload; sequence counter continuity verified in Python receiver; dropped packet count tracked in real time.
+* **Packet Structure (Type 0x05):** 16-byte `PacketHeader` + $N \times 6$-byte ADXL345 samples (typically 4–5 samples, max 8) + 1024-byte audio chunk (128 frames x 4 ch x 2 bytes) + 2-byte 16-bit XOR checksum (seed `0x55AA`) = 1,072 bytes per packet.
+* **Streaming Throughput:** $86.1328\text{ pkt/s} \times 1,072\text{ B/pkt} = 92,334.4\text{ B/s} = 92.33\text{ kB/s}$ ($80.15\%$ link utilization, $24.7\%$ headroom).
+* **UART TX Buffer:** Initialized with `Serial.setTxBufferSize(4096)` in `setup()`, allowing non-blocking DMA transmission without stalling the audio loop.
+* **Packet Integrity & Validation:** Contiguous 16-bit XOR checksum computed across header and payloads; sequence counter continuity verified in Python receiver; dropped packet count tracked in real time.
+* **Orientation-Invariant Order Tracking & ISO Velocity:**
+  * Multi-axis power spectrum $P(f) = |X_{\text{dyn}}(f)|^2 + |Y_{\text{dyn}}(f)|^2 + |Z_{\text{dyn}}(f)|^2$ provides orientation-invariant rotational order analysis without Euclidean magnitude rectification doubling.
+  * True ISO 10816-1 velocity RMS ($v_{\text{rms}}$ in mm/s) is computed via frequency-domain $\omega$-arithmetic integration in the 10 Hz – 200 Hz band.
 * **Phase Alignment & Inter-DMA Calibration:**
   * Master/Slave shared bit-clock (GPIO 18) and word-select (GPIO 21) eliminate sample-clock drift (0 PPM).
   * Empirical inter-DMA phase calibration (`calibrate_i2s_phase.py`) measured mean skew between Pair A (I2S0) and Pair B (I2S1) at $\Delta \tau = -24.69\ \mu\text{s}$ ($-1.09$ samples at 44.1 kHz, or $-0.27$ samples at 11.025 kHz), which is compensated via a 1-sample integer alignment shift.
