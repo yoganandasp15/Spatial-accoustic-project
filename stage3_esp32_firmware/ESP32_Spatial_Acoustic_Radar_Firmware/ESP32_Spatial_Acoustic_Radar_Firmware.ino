@@ -23,14 +23,17 @@
 #define MAX_ACCEL_PER_CHUNK 8    // Typically 4-5 samples at 400 Hz ODR per 12.8 ms chunk
 
 // ADXL345 Register Definitions
-#define ADXL345_ADDR        0x53
-#define ADXL345_DEVID       0x00
-#define ADXL345_BW_RATE     0x2C
-#define ADXL345_POWER_CTL   0x2D
-#define ADXL345_DATA_FORMAT 0x31
-#define ADXL345_FIFO_CTL    0x38
-#define ADXL345_FIFO_STATUS 0x39
-#define ADXL345_DATAX0      0x32
+#define ADXL345_DEFAULT_ADDR 0x53
+#define ADXL345_ALT_ADDR     0x1D
+#define ADXL345_DEVID        0x00
+#define ADXL345_BW_RATE      0x2C
+#define ADXL345_POWER_CTL    0x2D
+#define ADXL345_DATA_FORMAT  0x31
+#define ADXL345_FIFO_CTL     0x38
+#define ADXL345_FIFO_STATUS  0x39
+#define ADXL345_DATAX0       0x32
+
+uint8_t adxl_addr = ADXL345_DEFAULT_ADDR;
 
 // Packet Sync Header
 #define SYNC_BYTE_1          0xAA
@@ -93,34 +96,44 @@ bool init_adxl345() {
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, 100000); // 100 kHz standard mode prevents capacitive breadboard corruption
     delay(20);
 
-    Wire.beginTransmission(ADXL345_ADDR);
-    Wire.write(ADXL345_DEVID);
-    Wire.endTransmission(false);
-    Wire.requestFrom((uint8_t)ADXL345_ADDR, (uint8_t)1);
-    uint8_t devid = Wire.available() ? Wire.read() : 0;
-    adxl_present = (devid == 0xE5);
+    const uint8_t candidate_addrs[2] = {ADXL345_DEFAULT_ADDR, ADXL345_ALT_ADDR};
+    adxl_present = false;
+
+    for (int i = 0; i < 2; i++) {
+        uint8_t addr = candidate_addrs[i];
+        Wire.beginTransmission(addr);
+        Wire.write(ADXL345_DEVID);
+        Wire.endTransmission(false);
+        Wire.requestFrom((uint8_t)addr, (uint8_t)1);
+        uint8_t devid = Wire.available() ? Wire.read() : 0;
+        if (devid == 0xE5) {
+            adxl_addr = addr;
+            adxl_present = true;
+            break;
+        }
+    }
 
     if (adxl_present) {
         // 400 Hz ODR (BW_RATE = 0x0C)
-        Wire.beginTransmission(ADXL345_ADDR);
+        Wire.beginTransmission(adxl_addr);
         Wire.write(ADXL345_BW_RATE);
         Wire.write(0x0C);
         Wire.endTransmission();
 
         // +/- 2g Full Resolution (3.9 mg/LSB, DATA_FORMAT = 0x08)
-        Wire.beginTransmission(ADXL345_ADDR);
+        Wire.beginTransmission(adxl_addr);
         Wire.write(ADXL345_DATA_FORMAT);
         Wire.write(0x08);
         Wire.endTransmission();
 
         // FIFO Stream Mode (FIFO_CTL = 0x80)
-        Wire.beginTransmission(ADXL345_ADDR);
+        Wire.beginTransmission(adxl_addr);
         Wire.write(ADXL345_FIFO_CTL);
         Wire.write(0x80);
         Wire.endTransmission();
 
         // Measurement Mode (POWER_CTL = 0x08)
-        Wire.beginTransmission(ADXL345_ADDR);
+        Wire.beginTransmission(adxl_addr);
         Wire.write(ADXL345_POWER_CTL);
         Wire.write(0x08);
         Wire.endTransmission();
@@ -133,18 +146,18 @@ uint8_t read_adxl_fifo(AccelSample *out_buf, uint8_t max_samples) {
         return 0;  // Truthful 0 samples: never inject fabricated accelerometer readings
     }
 
-    Wire.beginTransmission(ADXL345_ADDR);
+    Wire.beginTransmission(adxl_addr);
     Wire.write(ADXL345_FIFO_STATUS);
     Wire.endTransmission(false);
-    Wire.requestFrom((uint8_t)ADXL345_ADDR, (uint8_t)1);
+    Wire.requestFrom((uint8_t)adxl_addr, (uint8_t)1);
     uint8_t entries = Wire.available() ? (Wire.read() & 0x3F) : 0;
 
     // Graceful fallback for clone chip or empty FIFO: read latest single sample directly
     if (entries == 0) {
-        Wire.beginTransmission(ADXL345_ADDR);
+        Wire.beginTransmission(adxl_addr);
         Wire.write(ADXL345_DATAX0);
         Wire.endTransmission(false);
-        Wire.requestFrom((uint8_t)ADXL345_ADDR, (uint8_t)6);
+        Wire.requestFrom((uint8_t)adxl_addr, (uint8_t)6);
         if (Wire.available() == 6) {
             int16_t rx = Wire.read() | (Wire.read() << 8);
             int16_t ry = Wire.read() | (Wire.read() << 8);
@@ -163,10 +176,10 @@ uint8_t read_adxl_fifo(AccelSample *out_buf, uint8_t max_samples) {
 
     if (entries > max_samples) entries = max_samples;
     for (uint8_t i = 0; i < entries; i++) {
-        Wire.beginTransmission(ADXL345_ADDR);
+        Wire.beginTransmission(adxl_addr);
         Wire.write(ADXL345_DATAX0);
         Wire.endTransmission(false);
-        Wire.requestFrom((uint8_t)ADXL345_ADDR, (uint8_t)6);
+        Wire.requestFrom((uint8_t)adxl_addr, (uint8_t)6);
         if (Wire.available() == 6) {
             int16_t rx = Wire.read() | (Wire.read() << 8);
             int16_t ry = Wire.read() | (Wire.read() << 8);
@@ -274,8 +287,13 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(FC03_DO_PIN), fc03_isr, RISING);
 
     Serial.println("\n[SPATIAL_RADAR] ESP32 4-Mic Dual-I2S Multimodal Streamer Online");
-    Serial.printf("[SPATIAL_RADAR] fs=%d, channels=4, baud=%d, ADXL345=%s (400Hz Stream FIFO)\n",
-                  SAMPLE_RATE, SERIAL_BAUD, adxl_present ? "OK" : "DEFAULT");
+    if (adxl_present) {
+        Serial.printf("[SPATIAL_RADAR] fs=%d, channels=4, baud=%d, ADXL345=0x%02X (OK, 400Hz Stream FIFO)\n",
+                      SAMPLE_RATE, SERIAL_BAUD, adxl_addr);
+    } else {
+        Serial.printf("[SPATIAL_RADAR] fs=%d, channels=4, baud=%d, ADXL345=DEFAULT (400Hz Stream FIFO)\n",
+                      SAMPLE_RATE, SERIAL_BAUD);
+    }
 }
 
 void loop() {
