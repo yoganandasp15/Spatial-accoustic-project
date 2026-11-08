@@ -1189,7 +1189,7 @@ class ESP32MultimodalSource(AudioSourceBase):
     + FC-03 tachometer at 1,152,000 baud using zero-copy binary DMA packets (packet type 0x05).
     """
 
-    def __init__(self, port: str = "COM8", baudrates: Tuple[int, ...] = (1152000, 921600, 115200)):
+    def __init__(self, port: str = "COM8", baudrates: Tuple[int, ...] = (921600, 1152000, 115200)):
         self.port = port
         self.baudrates = baudrates
         self.fs = 11025.0

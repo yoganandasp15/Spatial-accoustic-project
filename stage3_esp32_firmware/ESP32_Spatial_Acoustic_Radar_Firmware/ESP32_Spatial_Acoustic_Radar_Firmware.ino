@@ -17,10 +17,10 @@
 #define I2S1_SD_PIN      23   // D23 (Pair B: Mic 3 Left, Mic 4 Right)
 
 // Serial & Acquisition Parameters
-#define SERIAL_BAUD      1152000
-#define SAMPLE_RATE      11025   // Fits perfectly in 1,152,000 baud with 24.7% headroom
-#define CHUNK_FRAMES     128     // 128 frames = 11.6 ms per packet (86.1 packets/sec)
-#define MAX_ACCEL_PER_CHUNK 8    // Typically 4-5 samples at 400 Hz ODR per 11.6 ms chunk
+#define SERIAL_BAUD      921600  // Optimal CP2102 max hardware baud rate (zero framing/bit errors)
+#define SAMPLE_RATE      10000   // 10 kHz: Fits inside 921,600 baud with 9.1% healthy UART headroom
+#define CHUNK_FRAMES     128     // 128 frames = 12.8 ms per packet (78.1 packets/sec)
+#define MAX_ACCEL_PER_CHUNK 8    // Typically 4-5 samples at 400 Hz ODR per 12.8 ms chunk
 
 // ADXL345 Register Definitions
 #define ADXL345_ADDR        0x53
@@ -90,7 +90,7 @@ void IRAM_ATTR fc03_isr() {
 }
 
 bool init_adxl345() {
-    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, 400000);
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, 100000); // 100 kHz standard mode prevents capacitive breadboard corruption
     delay(20);
 
     Wire.beginTransmission(ADXL345_ADDR);
@@ -244,14 +244,18 @@ void init_dual_i2s_4mic() {
     PIN_INPUT_ENABLE(PERIPHS_IO_MUX_GPIO18_U);
     PIN_INPUT_ENABLE(PERIPHS_IO_MUX_GPIO21_U);
 
+    // Start slave first, then master clock generator
+    i2s_start(I2S_NUM_1);
+    i2s_start(I2S_NUM_0);
+
     i2s_zero_dma_buffer(I2S_NUM_0);
     i2s_zero_dma_buffer(I2S_NUM_1);
 
     // 4. Drain initial startup DMA blocks in lockstep to flush transient initialization skew
     size_t dummy_bytes = 0;
     for (int k = 0; k < 4; k++) {
-        i2s_read(I2S_NUM_0, dma_rx0, sizeof(dma_rx0), &dummy_bytes, pdMS_TO_TICKS(20));
-        i2s_read(I2S_NUM_1, dma_rx1, sizeof(dma_rx1), &dummy_bytes, pdMS_TO_TICKS(20));
+        i2s_read(I2S_NUM_0, dma_rx0, sizeof(dma_rx0), &dummy_bytes, pdMS_TO_TICKS(100));
+        i2s_read(I2S_NUM_1, dma_rx1, sizeof(dma_rx1), &dummy_bytes, pdMS_TO_TICKS(100));
     }
 }
 

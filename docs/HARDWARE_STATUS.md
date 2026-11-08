@@ -1,6 +1,6 @@
 # Hardware Status & Verified Wiring Specification
 
-**Status:** Physical hardware prototype assembled on breadboard, flashed, and verified live on **COM8 @ 1,152,000 baud** (Type 0x05 Binary Protocol with 400 Hz ADXL345 Stream FIFO).
+**Status:** Physical hardware prototype assembled on breadboard, flashed, and verified live on **COM8 @ 921,600 baud** (Type 0x05 Binary Protocol with 10 kHz Audio & 400 Hz ADXL345 Stream FIFO). CP2102 hardware UART bridge confirmed locked with 0 framing errors.
 
 ---
 
