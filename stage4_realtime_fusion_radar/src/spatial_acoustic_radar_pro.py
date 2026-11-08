@@ -130,16 +130,15 @@ class DynamicTargetTracker:
     ) -> Tuple[float, float, float, bool]:
         now = time.time()
 
-        if not is_active_sound or meas_prom < 0.35:
+        if not is_active_sound or meas_prom < 0.50:
             dt_silence = now - self.last_valid_time
-            if dt_silence > 0.40:
-                self.confidence *= 0.90
-                if self.confidence < 15.0:
-                    self.locked = False
+            self.confidence *= 0.85
+            if dt_silence > 0.25:
+                self.locked = False
             return self.tracked_angle, self.tracked_range, self.confidence, False
 
         self.last_valid_time = now
-        meas_conf_pct = min(99.0, max(30.0, meas_prom * 60.0))
+        meas_conf_pct = min(99.0, max(30.0, meas_prom * 50.0))
 
         if not self.locked:
             self.tracked_angle = meas_angle
@@ -149,27 +148,28 @@ class DynamicTargetTracker:
             self.pending_count = 0
         else:
             diff = meas_angle - self.tracked_angle
+            # Normalize angle difference to [-180, 180]
+            diff = (diff + 180.0) % 360.0 - 180.0
             if abs(diff) <= self.gate_deg:
                 self.tracked_angle += self.alpha * diff
                 self.tracked_range = 0.85 * self.tracked_range + 0.15 * nominal_range
                 self.confidence = (1.0 - self.alpha) * self.confidence + self.alpha * meas_conf_pct
                 self.pending_count = 0
             else:
-                # Fast re-acquisition when sound moves to opposite flank or off-axis
-                if meas_prom > 0.50:
-                    self.tracked_angle = 0.20 * self.tracked_angle + 0.80 * meas_angle
+                # Fast re-acquisition when sound moves across sectors
+                if meas_prom > 0.80:
+                    self.tracked_angle = 0.25 * self.tracked_angle + 0.75 * meas_angle
                     self.confidence = meas_conf_pct
                     self.pending_count = 0
                 else:
                     self.pending_angle = meas_angle
                     self.pending_count += 1
-                    if self.pending_count >= 2:
+                    if self.pending_count >= 3:
                         self.tracked_angle = meas_angle
                         self.confidence = meas_conf_pct
                         self.pending_count = 0
-                    self.confidence = max(25.0, self.confidence * 0.95)
 
-        return self.tracked_angle, self.tracked_range, self.confidence, True
+        return self.tracked_angle, self.tracked_range, self.confidence, self.locked
 
 
 # =============================================================================
@@ -273,22 +273,40 @@ class SRPPhatEngine:
         fs: float,
         d_ij_m: float,
         gamma: float = 0.70,
-        interp_factor: int = 16
-    ) -> Tuple[float, float, np.ndarray, np.ndarray]:
+        interp_factor: int = 16,
+        min_signal_rms: float = 0.0015
+    ) -> Tuple[float, float, np.ndarray, np.ndarray, bool]:
         """
         Computes super-resolution sinc GCC-PHAT between microphone pair (i, j).
         Convention: sig_i is leftward (smaller x), sig_j is rightward (larger x).
+        Returns:
+            best_tau: Estimated delay in seconds
+            prominence: SNR prominence of the correlation peak
+            c_phys: Cross-correlation in physical delay window
+            l_phys: Physical delay axis
+            is_valid: Boolean indicating whether peak passes coherence/PSR thresholds
         """
         n = len(sig_i)
-        w = signal.windows.tukey(n, alpha=0.25)
+        tau_max = (d_ij_m / SPEED_OF_SOUND) * 1.08
+        dummy_lags = np.linspace(-tau_max, tau_max, 3)
 
+        # 1. Absolute Energy Gating: Reject weak background noise before normalization
+        rms_i = float(np.sqrt(np.mean(sig_i ** 2)))
+        rms_j = float(np.sqrt(np.mean(sig_j ** 2)))
+        if rms_i < min_signal_rms or rms_j < min_signal_rms:
+            return 0.0, 0.0, np.zeros(3), dummy_lags, False
+
+        w = signal.windows.tukey(n, alpha=0.25)
         si = (sig_i - np.mean(sig_i)) * w
         sj = (sig_j - np.mean(sig_j)) * w
 
         std_i = float(np.std(si))
         std_j = float(np.std(sj))
-        if std_i > 1e-6: si = si / std_i
-        if std_j > 1e-6: sj = sj / std_j
+        if std_i < min_signal_rms or std_j < min_signal_rms:
+            return 0.0, 0.0, np.zeros(3), dummy_lags, False
+
+        si = si / std_i
+        sj = sj / std_j
 
         Si = rfft(si)
         Sj = rfft(sj)
@@ -301,9 +319,8 @@ class SRPPhatEngine:
 
         inband_energy = float(np.sum(mag[band_mask] ** 2))
         total_energy = float(np.sum(mag ** 2)) + 1e-20
-        if inband_energy / total_energy < 0.025:
-            dummy_lags = np.linspace(-n / (2 * fs), n / (2 * fs), 3)
-            return 0.0, 0.0, np.zeros(3), dummy_lags
+        if inband_energy / total_energy < 0.04:
+            return 0.0, 0.0, np.zeros(3), dummy_lags, False
 
         cross[~band_mask] = 0.0
         peak_mag = max(1e-12, float(np.max(mag ** gamma))) if len(mag) > 0 else 1.0
@@ -319,14 +336,12 @@ class SRPPhatEngine:
         dt_fine = 1.0 / (fs * interp_factor)
         lags = np.arange(-n_interp // 2, n_interp // 2) * dt_fine
 
-        tau_max = (d_ij_m / SPEED_OF_SOUND) * 1.08
         phys_mask = np.abs(lags) <= tau_max
-
         c_phys = corr[phys_mask]
         l_phys = lags[phys_mask]
 
-        if len(c_phys) < 3:
-            return 0.0, 0.0, c_phys, l_phys
+        if len(c_phys) < 5:
+            return 0.0, 0.0, c_phys, l_phys, False
 
         k = int(np.argmax(c_phys))
         peak_val = float(c_phys[k])
@@ -334,8 +349,19 @@ class SRPPhatEngine:
         std_val = float(np.std(c_phys)) + 1e-12
         prominence = max(0.0, (peak_val - mean_val) / std_val)
 
+        # 2. Peak-to-Sidelobe Ratio (PSR) Coherence Test:
+        # In white noise, multiple peaks have similar heights (low peak_val < 0.035 or PSR < 1.15).
+        # In coherent acoustic sound, the main peak strongly dominates (peak_val >= 0.035, PSR >= 1.15).
+        c_ex = c_phys.copy()
+        lobe_w = max(2, int(round(0.000030 / dt_fine))) # 30 μs main lobe window
+        c_ex[max(0, k - lobe_w):min(len(c_ex), k + lobe_w + 1)] = -1e9
+        sec_peak = float(np.max(c_ex)) if len(c_ex) > 0 else 0.0
+        psr = peak_val / max(1e-12, sec_peak)
+
+        is_valid = bool(psr >= 1.15 and prominence >= 1.0 and peak_val > 0.035)
+
         if k == 0 or k == len(c_phys) - 1:
-            return 0.0, 0.0, c_phys, l_phys
+            return 0.0, 0.0, c_phys, l_phys, False
 
         if 0 < k < len(c_phys) - 1:
             y0, y1, y2 = float(c_phys[k - 1]), float(c_phys[k]), float(c_phys[k + 1])
@@ -350,14 +376,15 @@ class SRPPhatEngine:
             best_tau = float(l_phys[k])
 
         best_tau = max(-tau_max, min(tau_max, best_tau))
-        return best_tau, prominence, c_phys, l_phys
+        return best_tau, prominence, c_phys, l_phys, is_valid
 
     @classmethod
     def compute_srp_frame(
         cls,
         signals: np.ndarray,
         fs: float,
-        geometry: ArrayGeometry
+        geometry: ArrayGeometry,
+        min_active_rms: float = 0.0020
     ) -> Tuple[float, float, np.ndarray, np.ndarray, np.ndarray, Dict[str, object]]:
         """
         Steered Response Power (SRP) bearing estimation AND True 2D Acoustic Camera Backprojection.
@@ -367,7 +394,7 @@ class SRPPhatEngine:
             angles_deg: Angle grid (181 points)
             srp_norm: Normalized 1D SRP power vs angle
             raw_2d_heatmap: True 2D backprojected acoustic intensity field (GRID_Y, GRID_X)
-            side_metrics: Directional power breakdown (pct_left, pct_center, pct_right, dom_side)
+            side_metrics: Directional power breakdown (pct_left, pct_center, pct_right, dom_side, is_valid, active_pairs)
         """
         num_mics = min(signals.shape[1], geometry.num_mics)
         angles_deg = np.linspace(-90.0, 90.0, 181)
@@ -378,8 +405,43 @@ class SRPPhatEngine:
         raw_2d_heatmap = np.zeros((GRID_Y, GRID_X), dtype=np.float64)
         pair_prominences = []
 
+        # 1. Per-Channel Health & Signal Strength Diagnostics
+        ch_rms = [float(np.sqrt(np.mean(signals[:, m]**2))) for m in range(num_mics)]
+        ch_peak = [float(np.max(np.abs(signals[:, m]))) for m in range(num_mics)]
+        avg_rms = float(np.mean(ch_rms)) if ch_rms else 0.0
+
+        ch_status = []
+        for m in range(num_mics):
+            if ch_peak[m] > 0.98:
+                ch_status.append("CLIPPED")
+            elif ch_rms[m] < 1e-4 and avg_rms > 0.003:
+                ch_status.append("DEAD")
+            elif ch_rms[m] < min_active_rms:
+                ch_status.append("QUIET")
+            else:
+                ch_status.append("ACTIVE")
+
+        # Silence Gate: If overall acoustic energy is below physical threshold,
+        # return an explicit QUIET state immediately. DO NOT compute SRP on noise!
+        if avg_rms < min_active_rms or sum(st != "DEAD" for st in ch_status) < 2:
+            return (
+                0.0,
+                0.0,
+                angles_deg,
+                np.zeros_like(angles_deg),
+                np.zeros((GRID_Y, GRID_X), dtype=np.float64),
+                {
+                    "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
+                    "dom_side": "NONE", "is_valid": False, "active_pairs": 0,
+                    "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status
+                }
+            )
+
+        valid_pairs_count = 0
         for p_idx, (i, j) in enumerate(geometry.pairs):
             if i >= num_mics or j >= num_mics:
+                continue
+            if ch_status[i] == "DEAD" or ch_status[j] == "DEAD":
                 continue
 
             sig_i = signals[:, i]
@@ -387,14 +449,17 @@ class SRPPhatEngine:
             d_x = geometry.mic_coords[j, 0] - geometry.mic_coords[i, 0]
             d_ij = abs(d_x) if abs(d_x) > 1e-4 else geometry.baseline_m
 
-            best_tau, prom, c_phys, l_phys = cls.gcc_phat_pair(sig_i, sig_j, fs, d_ij)
+            best_tau, prom, c_phys, l_phys, is_valid = cls.gcc_phat_pair(
+                sig_i, sig_j, fs, d_ij, min_signal_rms=min_active_rms * 0.70
+            )
             pair_prominences.append(prom)
 
-            if len(c_phys) >= 3 and prom >= 0.20:
+            if is_valid and len(c_phys) >= 5 and prom >= 1.0:
+                valid_pairs_count += 1
                 # 1D angular SRP: tau = +(d_x / c) * sin(theta) (Positive lag for sound on right)
                 taus_1d = +(d_x / SPEED_OF_SOUND) * sin_angles
                 pair_resp_1d = np.interp(taus_1d, l_phys, c_phys, left=0.0, right=0.0)
-                pair_weight = math.sqrt(d_ij / geometry.baseline_m) * min(prom, 3.0)
+                pair_weight = math.sqrt(d_ij / geometry.baseline_m) * min(prom, 4.0)
                 srp_profile += pair_weight * np.maximum(pair_resp_1d, 0.0)
 
                 # 2D True Spatial SRP Backprojection across physical room grid
@@ -402,17 +467,44 @@ class SRPPhatEngine:
                 pair_resp_2d = np.interp(tau_grid, l_phys, c_phys, left=0.0, right=0.0).reshape((GRID_Y, GRID_X))
                 raw_2d_heatmap += pair_weight * np.maximum(pair_resp_2d, 0.0)
 
-        if np.max(srp_profile) > 1e-9:
-            srp_norm = srp_profile / np.max(srp_profile)
-            k_peak = int(np.argmax(srp_norm))
-            best_bearing_deg = float(angles_deg[k_peak])
-            mean_srp = float(np.mean(srp_norm))
-            std_srp = float(np.std(srp_norm)) + 1e-12
-            composite_prom = max(0.0, (1.0 - mean_srp) / std_srp)
-        else:
-            srp_norm = np.zeros_like(angles_deg)
-            best_bearing_deg = 0.0
-            composite_prom = 0.0
+        # Consistency Gate: Require at least 2 valid pairs in consensus to form a reliable direction
+        max_srp = float(np.max(srp_profile))
+        if valid_pairs_count < 2 or max_srp < 1e-6:
+            return (
+                0.0,
+                0.0,
+                angles_deg,
+                np.zeros_like(angles_deg),
+                np.zeros((GRID_Y, GRID_X), dtype=np.float64),
+                {
+                    "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
+                    "dom_side": "NONE", "is_valid": False, "active_pairs": valid_pairs_count,
+                    "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status
+                }
+            )
+
+        srp_norm = srp_profile / max_srp
+        k_peak = int(np.argmax(srp_norm))
+        best_bearing_deg = float(angles_deg[k_peak])
+        mean_srp = float(np.mean(srp_norm))
+        std_srp = float(np.std(srp_norm)) + 1e-12
+        composite_prom = max(0.0, (1.0 - mean_srp) / std_srp)
+
+        # Contrast check: is the peak well-separated from the angular baseline?
+        if composite_prom < 1.15:
+            # Low contrast / diffuse acoustic field - not a distinct directional source
+            return (
+                0.0,
+                0.0,
+                angles_deg,
+                srp_norm,
+                raw_2d_heatmap,
+                {
+                    "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
+                    "dom_side": "NONE", "is_valid": False, "active_pairs": valid_pairs_count,
+                    "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status
+                }
+            )
 
         # Sector Power & Side Intensity Breakdown with Noise-Floor Contrast
         l_mask = angles_deg < -15.0
@@ -442,7 +534,12 @@ class SRPPhatEngine:
             "pct_left": pct_left,
             "pct_center": pct_center,
             "pct_right": pct_right,
-            "dom_side": dom_side
+            "dom_side": dom_side,
+            "is_valid": True,
+            "active_pairs": valid_pairs_count,
+            "avg_rms": avg_rms,
+            "ch_rms": ch_rms,
+            "ch_status": ch_status
         }
 
         return best_bearing_deg, composite_prom, angles_deg, srp_norm, raw_2d_heatmap, side_metrics
@@ -1361,19 +1458,9 @@ class ESP32MultimodalSource(AudioSourceBase):
     def get_frame(self) -> np.ndarray:
         with self.lock:
             if not self.telemetry["is_hardware_alive"]:
-                # Simulation fallback when hardware unpowered
-                t = np.arange(self.frame_len) / self.fs + (time.time() % 10.0)
-                angle_deg = 35.0 * np.sin(2 * np.pi * 0.25 * time.time())
-                angle_rad = np.deg2rad(angle_deg)
-                d_pitch = 0.02032
-                mic_x = np.array([-1.5, -0.5, 0.5, 1.5]) * d_pitch
-                sim_buf = np.zeros((self.frame_len, 4), dtype=np.float32)
-                base_sig = 0.6 * np.sin(2 * np.pi * 1250.0 * t) + 0.04 * np.random.randn(self.frame_len)
-                for i in range(4):
-                    delay_s = (mic_x[i] * np.sin(angle_rad)) / SPEED_OF_SOUND
-                    shift = int(round(delay_s * self.fs))
-                    sim_buf[:, i] = np.roll(base_sig, shift)
-                return sim_buf
+                # Hardware disconnected or standby: Return silent zeros.
+                # NEVER invent synthetic moving audio in ESP32 hardware mode!
+                return np.zeros((self.frame_len, self.channels), dtype=np.float32)
             return self.buffer.copy()
 
     def get_fs(self) -> float:
@@ -1564,8 +1651,14 @@ class AcousticRadarApp:
         self.tracker = DynamicTargetTracker(alpha=0.40, gate_deg=30.0)
 
         # Adaptive Noise Gate calibrated for 16-bit INMP441 normalized audio
-        self.noise_floor = 0.020
-        self.noise_gate_rms = 0.035
+        self.noise_floor = 0.0030
+        self.min_active_threshold = 0.0035
+        self.calib_noise_frames = 25
+        self.calib_noise_collected = 0
+        self.calib_noise_samples = []
+        self.is_calibrating_ambient = True
+        self.last_active_sound_time = time.time()
+        self.hangover_sec = 0.35
 
         # Display State
         self.smoothed_heatmap = np.zeros((GRID_Y, GRID_X), dtype=np.float64)
@@ -1576,6 +1669,8 @@ class AcousticRadarApp:
 
         # I2S Dual-Pair Phase Calibration Delay (Seconds)
         self.calib_delay_sec = 0.0
+        self.apply_calibration = False
+        self.calib_status_str = "UNCALIBRATED (RAW DMA)"
         proj_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         calib_candidates = [
             os.path.join(proj_dir, "stage2_acoustic_localization", "evidence", "i2s_phase_calibration.json"),
@@ -1588,11 +1683,21 @@ class AcousticRadarApp:
                 try:
                     with open(c_path, 'r') as f:
                         c_data = json.load(f)
+                        is_healthy = bool(c_data.get("is_sync_healthy", False))
                         if "inter_pair_comp_delay_sec" in c_data:
                             self.calib_delay_sec = float(c_data["inter_pair_comp_delay_sec"])
                         elif "inter_pair_mean_skew_us" in c_data:
                             self.calib_delay_sec = float(c_data["inter_pair_mean_skew_us"]) * 1e-6
-                        print(f"[*] Acoustic Radar: Loaded Phase Calibration from {os.path.basename(c_path)}: Delay = {self.calib_delay_sec*1e6:+.2f} μs")
+
+                        if is_healthy:
+                            self.apply_calibration = True
+                            self.calib_status_str = f"ACTIVE ({self.calib_delay_sec*1e6:+.2f} μs)"
+                            print(f"[*] Acoustic Radar: Loaded HEALTHY Phase Calibration: Delay = {self.calib_delay_sec*1e6:+.2f} μs")
+                        else:
+                            self.apply_calibration = False
+                            self.calib_status_str = f"BYPASSED (SKEWED: {self.calib_delay_sec*1e6:+.2f} μs, Raw DMA)"
+                            print(f"[!] Warning: Phase calibration file reports is_sync_healthy=False ({c_data.get('status_diagnosis', 'SKEWED')}).")
+                            print(f"    Calibration BYPASSED by default (Raw DMA alignment used). Press 'K' to toggle.")
                         break
                 except Exception as e:
                     print(f"[!] Warning reading phase calibration from {c_path}: {e}")
@@ -1866,6 +1971,13 @@ class AcousticRadarApp:
         elif event.key in ("c", "C"):
             self.motor_engine.reset_baseline()
             print("[+] Motor Golden Baseline Cleared / Reset.")
+        elif event.key in ("n", "N"):
+            self.calibrate_ambient_noise()
+        elif event.key in ("k", "K"):
+            self.apply_calibration = not self.apply_calibration
+            tag = f"ACTIVE ({self.calib_delay_sec*1e6:+.2f} μs)" if self.apply_calibration else "BYPASSED (RAW DMA)"
+            self.calib_status_str = tag
+            print(f"[+] Phase Calibration Toggled: {tag}")
         elif event.key in ("p", "P"):
             self.pulses_per_rev_idx = (self.pulses_per_rev_idx + 1) % len(self.pulses_options)
             self.pulses_per_rev = self.pulses_options[self.pulses_per_rev_idx]
@@ -1902,6 +2014,13 @@ class AcousticRadarApp:
                 self.mic_labels[i].set_visible(True)
             else:
                 self.mic_labels[i].set_visible(False)
+
+    def calibrate_ambient_noise(self):
+        """Triggers re-calibration of the ambient room noise floor."""
+        self.calib_noise_collected = 0
+        self.calib_noise_samples = []
+        self.is_calibrating_ambient = True
+        print("[*] Re-calibrating ambient quiet-room noise floor (listening 25 frames)...")
 
     def _switch_source(self, source_type: str, geometry_key: str):
         if source_type == self.active_source_type:
@@ -1943,8 +2062,8 @@ class AcousticRadarApp:
             if self.invert_channels:
                 raw_frame = np.fliplr(raw_frame)
 
-            # Apply I2S phase calibration compensation to Pair B (channels 2 & 3)
-            if abs(self.calib_delay_sec) > 1e-12 and raw_frame.shape[1] >= 4:
+            # Apply I2S phase calibration compensation to Pair B ONLY if enabled
+            if self.apply_calibration and abs(self.calib_delay_sec) > 1e-12 and raw_frame.shape[1] >= 4:
                 raw_frame = apply_pair_phase_compensation(raw_frame, fs, self.calib_delay_sec)
 
             # 1. Update 4-Channel Live Waveforms & VU Badges
@@ -1968,30 +2087,57 @@ class AcousticRadarApp:
                     self.wave_lines[i].set_data(x_axis, scaled_wave)
 
                     dbfs = 20.0 * math.log10(max(r_val, 1e-5))
-                    status_str = "ACTIVE" if r_val > 0.0015 else "QUIET "
+                    status_str = "ACTIVE" if r_val > 0.0020 else "QUIET "
                     self.vu_texts[i].set_text(f"M{i+1}: RMS={r_val:.4f} ({dbfs:+.1f}dB) | {status_str}")
                 else:
                     self.wave_lines[i].set_data([], [])
                     self.vu_texts[i].set_text(f"M{i+1}: [DISABLED]")
 
             avg_rms = float(np.mean(rms_per_ch)) if rms_per_ch else 0.0
-            # Track ambient floor dynamically during quiet intervals
-            if avg_rms < self.noise_floor * 1.6:
-                self.noise_floor = 0.95 * self.noise_floor + 0.05 * avg_rms
-            else:
-                self.noise_floor = 0.995 * self.noise_floor + 0.005 * avg_rms
+            now = time.time()
 
-            # Sound is active when average RMS rises above ambient floor by at least 15% AND above 0.0020
-            is_active_sound = bool(avg_rms >= max(0.0020, self.noise_floor * 1.15))
+            # Ambient quiet-room noise floor calibration
+            if self.is_calibrating_ambient:
+                self.calib_noise_samples.append(avg_rms)
+                self.calib_noise_collected += 1
+                if self.calib_noise_collected >= self.calib_noise_frames:
+                    self.noise_floor = max(0.0010, float(np.median(self.calib_noise_samples)))
+                    self.min_active_threshold = max(0.0030, self.noise_floor * 1.50)
+                    self.is_calibrating_ambient = False
+                    print(f"[*] Ambient Noise Calibrated: Floor={self.noise_floor:.5f}, ActiveThreshold={self.min_active_threshold:.5f}")
+
+            # Dual-threshold VAD with Hangover:
+            attack_thresh = max(self.min_active_threshold, self.noise_floor * 1.60)
+            release_thresh = max(0.0020, self.noise_floor * 1.25)
+
+            if avg_rms >= attack_thresh:
+                self.last_active_sound_time = now
+                is_active_sound = True
+            elif (now - self.last_active_sound_time) < self.hangover_sec:
+                # Within hangover window - remain active if above release threshold
+                is_active_sound = bool(avg_rms >= release_thresh)
+            else:
+                is_active_sound = False
+
+            # Noise floor adaptation rules:
+            if not is_active_sound and (now - self.last_active_sound_time) > 0.60:
+                # Confirmed quiet interval: slowly track ambient baseline
+                if avg_rms < self.noise_floor:
+                    self.noise_floor = 0.92 * self.noise_floor + 0.08 * avg_rms
+                elif avg_rms < self.noise_floor * 1.30:
+                    self.noise_floor = 0.995 * self.noise_floor + 0.005 * avg_rms
 
             # 2. Multi-Pair Steered Response Power & 2D Backprojection
+            min_srp_rms = max(0.0020, self.noise_floor * 1.20)
             best_bearing, composite_prom, srp_angles, srp_norm, raw_2d_heatmap, side_metrics = (
-                SRPPhatEngine.compute_srp_frame(raw_frame, fs, self.geometry)
+                SRPPhatEngine.compute_srp_frame(raw_frame, fs, self.geometry, min_active_rms=min_srp_rms)
             )
+
+            is_source_valid = bool(is_active_sound and side_metrics.get("is_valid", False))
 
             # 3. Dynamic Target Tracker
             target_angle, target_range, confidence, is_locked = self.tracker.update(
-                best_bearing, composite_prom, is_active_sound, nominal_range=1.25
+                best_bearing, composite_prom, is_source_valid, nominal_range=1.25
             )
 
             target_rad = math.radians(target_angle)
@@ -1999,38 +2145,62 @@ class AcousticRadarApp:
             target_y = target_range * math.cos(target_rad)
 
             # 4. True 2D Acoustic Camera Thermal Heatmap (Real Backprojected Energy)
-            acoustic_heat = SRPPhatEngine.compute_true_2d_acoustic_heatmap(
-                raw_2d_heatmap, target_range, avg_rms, is_locked, self.geometry
-            )
-
-            if is_locked or is_active_sound:
+            if is_source_valid:
+                acoustic_heat = SRPPhatEngine.compute_true_2d_acoustic_heatmap(
+                    raw_2d_heatmap, target_range, avg_rms, is_locked, self.geometry
+                )
                 self.smoothed_heatmap = (
                     HEATMAP_SMOOTH_ALPHA * self.smoothed_heatmap
                     + (1.0 - HEATMAP_SMOOTH_ALPHA) * acoustic_heat
                 )
             else:
-                self.smoothed_heatmap *= 0.85
+                self.smoothed_heatmap *= 0.65
 
             self.im_heat.set_data(self.smoothed_heatmap)
 
-            marker_color = "#00ffcc" if is_locked else "#ffaa00"
-            self.marker_source.set_data([target_x], [target_y])
-            self.marker_source.set_markeredgecolor(marker_color)
-            self.target_line.set_data([0, target_x], [0, target_y])
-            self.target_line.set_color(marker_color)
+            # Needles & Target Line
+            if is_source_valid and is_locked:
+                marker_color = "#00ffcc"
+                self.marker_source.set_data([target_x], [target_y])
+                self.marker_source.set_markeredgecolor(marker_color)
+                self.target_line.set_data([0, target_x], [0, target_y])
+                self.target_line.set_color(marker_color)
+                meas_rad = math.radians(best_bearing)
+                self.meas_needle.set_data([meas_rad, meas_rad], [0, 0.85])
+                self.radar_needle.set_data([target_rad, target_rad], [0, 1.0])
+                self.radar_needle.set_color(marker_color)
+            elif is_source_valid:
+                marker_color = "#ffaa00"
+                self.marker_source.set_data([target_x], [target_y])
+                self.marker_source.set_markeredgecolor(marker_color)
+                self.target_line.set_data([0, target_x], [0, target_y])
+                self.target_line.set_color(marker_color)
+                meas_rad = math.radians(best_bearing)
+                self.meas_needle.set_data([meas_rad, meas_rad], [0, 0.85])
+                self.radar_needle.set_data([target_rad, target_rad], [0, 0.5])
+                self.radar_needle.set_color(marker_color)
+            else:
+                self.marker_source.set_data([], [])
+                self.target_line.set_data([], [])
+                self.meas_needle.set_data([], [])
+                self.radar_needle.set_data([], [])
 
             # 4b. Dynamic Sound Intensity Side Indicators (Left / Center / Right)
             pct_l = float(side_metrics.get("pct_left", 33.3))
             pct_c = float(side_metrics.get("pct_center", 33.3))
             pct_r = float(side_metrics.get("pct_right", 33.3))
-            dom_s = str(side_metrics.get("dom_side", "CENTER"))
+            dom_s = str(side_metrics.get("dom_side", "NONE"))
 
-            # Dynamic logarithmic/square-root VU gain
-            rms_rel = max(0.0, avg_rms - self.noise_floor) / max(0.015, self.noise_floor * 3.0)
-            rms_scale = min(1.0, math.sqrt(min(1.0, max(0.05, rms_rel))))
-            intensity_l = float(min(1.0, (pct_l / 100.0) * rms_scale * 1.35))
-            intensity_r = float(min(1.0, (pct_r / 100.0) * rms_scale * 1.35))
-            intensity_c = float(min(1.0, (pct_c / 100.0) * rms_scale * 1.35))
+            if is_source_valid:
+                rms_rel = max(0.0, avg_rms - self.noise_floor) / max(0.015, self.noise_floor * 3.0)
+                rms_scale = min(1.0, math.sqrt(min(1.0, max(0.05, rms_rel))))
+                intensity_l = float(min(1.0, (pct_l / 100.0) * rms_scale * 1.35))
+                intensity_r = float(min(1.0, (pct_r / 100.0) * rms_scale * 1.35))
+                intensity_c = float(min(1.0, (pct_c / 100.0) * rms_scale * 1.35))
+            else:
+                intensity_l = 0.02
+                intensity_r = 0.02
+                intensity_c = 0.02
 
             y_bot, y_top = 0.45, 3.25
             y_span = y_top - y_bot
@@ -2038,22 +2208,22 @@ class AcousticRadarApp:
             # Left VU rail
             h_left = y_bot + y_span * intensity_l
             self.left_gauge_fill.set_data([-1.88, -1.88], [y_bot, h_left])
-            c_left = "#ff0055" if (pct_l >= 48.0 and is_active_sound) else ("#ffaa00" if pct_l >= 36.0 else "#00ffcc")
+            c_left = "#ff0055" if (pct_l >= 48.0 and is_source_valid) else ("#ffaa00" if (pct_l >= 36.0 and is_source_valid) else "#00ffcc")
             self.left_gauge_fill.set_color(c_left)
             self.left_gauge_text.set_color(c_left)
-            self.left_gauge_text.set_text(f"◄ LEFT\n{pct_l:.0f}%")
+            self.left_gauge_text.set_text(f"◄ LEFT\n{pct_l:.0f}%" if is_source_valid else "◄ LEFT\nIDLE")
 
             # Right VU rail
             h_right = y_bot + y_span * intensity_r
             self.right_gauge_fill.set_data([1.88, 1.88], [y_bot, h_right])
-            c_right = "#ff0055" if (pct_r >= 48.0 and is_active_sound) else ("#ffaa00" if pct_r >= 36.0 else "#00ffcc")
+            c_right = "#ff0055" if (pct_r >= 48.0 and is_source_valid) else ("#ffaa00" if (pct_r >= 36.0 and is_source_valid) else "#00ffcc")
             self.right_gauge_fill.set_color(c_right)
             self.right_gauge_text.set_color(c_right)
-            self.right_gauge_text.set_text(f"RIGHT ►\n{pct_r:.0f}%")
+            self.right_gauge_text.set_text(f"RIGHT ►\n{pct_r:.0f}%" if is_source_valid else "RIGHT ►\nIDLE")
 
             # Incoming Sector HUD Banner
-            if not is_active_sound:
-                self.sector_banner_text.set_text("• AMBIENT NOISE FLOOR (QUIET) •")
+            if not is_source_valid:
+                self.sector_banner_text.set_text("■ QUIET IDLE — NO ACTIVE SOUND DETECTED ■")
                 self.sector_banner_text.set_color("#6b7d99")
             elif dom_s == "LEFT":
                 self.sector_banner_text.set_text(f"◄◄ INCOMING SOUND: LEFT FLANK ({target_angle:+.1f}°) | {pct_l:.0f}% INTENSITY")
@@ -2067,21 +2237,22 @@ class AcousticRadarApp:
 
             # 5. Polar Radar Sweep
             polar_angles_deg = np.linspace(-90, 90, 181)
-            target_conf = confidence if is_locked else confidence * 0.40
-            ang_diff = polar_angles_deg - target_angle
-            radar_profile = np.exp(-0.5 * (ang_diff / 8.0) ** 2) * (target_conf / 100.0)
-            self.radar_line.set_data(self.radar_angles, radar_profile)
-
-            meas_rad = math.radians(best_bearing)
-            self.meas_needle.set_data([meas_rad, meas_rad], [0, 0.85])
-            self.radar_needle.set_data([target_rad, target_rad], [0, 1.0])
-            self.radar_needle.set_color(marker_color)
+            if is_source_valid:
+                target_conf = confidence if is_locked else confidence * 0.40
+                ang_diff = polar_angles_deg - target_angle
+                radar_profile = np.exp(-0.5 * (ang_diff / 8.0) ** 2) * (target_conf / 100.0)
+                self.radar_line.set_data(self.radar_angles, radar_profile)
+            else:
+                self.radar_line.set_data(self.radar_angles, np.zeros_like(self.radar_angles))
 
             # 6. SRP-PHAT Angular Profile Plot
-            if len(srp_norm) > 0:
+            if is_source_valid and len(srp_norm) > 0 and np.max(srp_norm) > 0.01:
                 self.srp_line.set_data(srp_angles, srp_norm)
                 peak_idx = int(np.argmin(np.abs(srp_angles - best_bearing)))
                 self.srp_peak_marker.set_data([best_bearing], [srp_norm[peak_idx]])
+            else:
+                self.srp_line.set_data(srp_angles, np.zeros_like(srp_angles))
+                self.srp_peak_marker.set_data([], [])
 
             # 7. Multimodal DC Motor Diagnostics & Sensor Fusion
             telemetry = self.current_source.get_multimodal_telemetry()
@@ -2163,12 +2334,14 @@ class AcousticRadarApp:
                 f"   LEFT FLANK  : [{make_vu_bar(pct_l)}] {pct_l:4.1f}% ({db_l:+5.1f} dBFS) {'◄-- ACTIVE' if dom_s=='LEFT' and is_active_sound else ''}",
                 f"   FRONT CENTER: [{make_vu_bar(pct_c)}] {pct_c:4.1f}% ({db_c:+5.1f} dBFS) {'▲-- ACTIVE' if dom_s=='CENTER' and is_active_sound else ''}",
                 f"   RIGHT FLANK : [{make_vu_bar(pct_r)}] {pct_r:4.1f}% ({db_r:+5.1f} dBFS) {'ACTIVE --►' if dom_s=='RIGHT' and is_active_sound else ''}",
+                f" [CALIBRATION & VAD]  Phase Calib: {self.calib_status_str} | Ambient Floor: {self.noise_floor:.5f} | VAD: {'ACTIVE SOUND' if is_active_sound else 'QUIET IDLE'}",
                 f" [SERIAL INTEGRITY]   Valid Pkts: {telemetry.get('packets_valid', 0)} | Drops: {telemetry.get('dropped_packets', 0)} | ChkErr: {telemetry.get('checksum_errors', 0)}",
                 f" [ARRAY APERTURE]     Spacing: {self.geometry.baseline_m * 1000.0:4.1f} mm | Span: {self.geometry.baseline_m * 3000.0:4.1f} mm | [{invert_badge}]",
                 f" [HARDWARE LINK]      Status: {hw_badge} | Mode: {fw_mode}",
                 "==========================================================================================",
-                " [HOTKEYS] 'B': Learn Baseline  |  'C': Clear Baseline  |  'P': Cycle PPR ({self.pulses_per_rev})",
-                "           'I': Invert Polarity  |  'R': Reset Tracker  |  '1': Laptop  |  '2': ESP32  |  '3': Sim"
+                f" [HOTKEYS] 'B': Learn Baseline  |  'C': Clear Baseline  |  'P': Cycle PPR ({self.pulses_per_rev})",
+                "           'N': Calib Ambient   |  'K': Toggle Calib    |  'I': Invert Polarity  |  'R': Reset Tracker",
+                "           '1': Laptop Mic      |  '2': ESP32 4-Mic     |  '3': Synthetic Sim"
             ]
             self.hud_text.set_text("\n".join(hud_lines))
 
