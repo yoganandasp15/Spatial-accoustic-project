@@ -459,16 +459,10 @@ class SRPPhatEngine:
         std_val = float(np.std(c_phys)) + 1e-12
         prominence = max(0.0, (peak_val - mean_val) / std_val)
 
-        # 2. Peak-to-Sidelobe Ratio (PSR) Coherence Test:
-        # In white noise, multiple peaks have similar heights (low peak_val < 0.035 or PSR < 1.15).
-        # In coherent acoustic sound, the main peak strongly dominates (peak_val >= 0.035, PSR >= 1.15).
-        c_ex = c_phys.copy()
-        lobe_w = max(2, int(round(0.000030 / dt_fine))) # 30 μs main lobe window
-        c_ex[max(0, k - lobe_w):min(len(c_ex), k + lobe_w + 1)] = -1e9
-        sec_peak = float(np.max(c_ex)) if len(c_ex) > 0 else 0.0
-        psr = peak_val / max(1e-12, sec_peak)
-
-        is_valid = bool(psr >= 1.15 and prominence >= 1.0 and peak_val > 0.035)
+        # 2. Statistical Peak Significance Test:
+        # Validates that cross-correlation peak rises significantly above baseline correlation floor
+        # and does not stick to the unphysical lag window boundary.
+        is_valid = bool(prominence >= 0.70 and peak_val > 0.012 and 0 < k < len(c_phys) - 1)
 
         if k == 0 or k == len(c_phys) - 1:
             return 0.0, 0.0, c_phys, l_phys, False
@@ -570,10 +564,15 @@ class SRPPhatEngine:
 
         valid_pairs_count = 0
         pair_angles: List[float] = []
+        active_ch_count = sum(st == "ACTIVE" for st in ch_status)
+
         for p_idx, (i, j) in enumerate(geometry.pairs):
             if i >= num_mics or j >= num_mics:
                 continue
             if ch_status[i] == "DEAD" or ch_status[j] == "DEAD":
+                continue
+            # When at least 2 microphones are actively receiving sound, prioritize active pairs
+            if active_ch_count >= 2 and (ch_status[i] != "ACTIVE" or ch_status[j] != "ACTIVE"):
                 continue
 
             sig_i = signals[:, i]
@@ -582,11 +581,11 @@ class SRPPhatEngine:
             d_ij = abs(d_x) if abs(d_x) > 1e-4 else geometry.baseline_m
 
             best_tau, prom, c_phys, l_phys, is_valid = cls.gcc_phat_pair(
-                sig_i, sig_j, fs, d_ij, min_signal_rms=min_active_rms * 0.70
+                sig_i, sig_j, fs, d_ij, min_signal_rms=min_active_rms * 0.50
             )
             pair_prominences.append(prom)
 
-            if is_valid and len(c_phys) >= 5 and prom >= 1.0:
+            if is_valid and len(c_phys) >= 5 and prom >= 0.70:
                 valid_pairs_count += 1
                 sin_p = np.clip((best_tau * SPEED_OF_SOUND) / d_x, -1.0, 1.0)
                 pair_angles.append(float(np.rad2deg(np.arcsin(sin_p))))
@@ -601,9 +600,9 @@ class SRPPhatEngine:
                 pair_resp_2d = np.interp(tau_grid, l_phys, c_phys, left=0.0, right=0.0).reshape((GRID_Y, GRID_X))
                 raw_2d_heatmap += pair_weight * np.maximum(pair_resp_2d, 0.0)
 
-        # Consistency Gate: Require at least 2 valid pairs in consensus to form a reliable direction
+        # Consistency Gate: Require at least 1 valid pair to form a reliable bearing
         max_srp = float(np.max(srp_profile))
-        if valid_pairs_count < 2 or max_srp < 1e-6:
+        if valid_pairs_count < 1 or max_srp < 1e-6:
             return (
                 0.0,
                 0.0,
@@ -626,11 +625,11 @@ class SRPPhatEngine:
         composite_prom = max(0.0, (1.0 - mean_srp) / std_srp)
 
         # Contrast check: is the peak well-separated from the angular baseline?
-        if composite_prom < 1.15:
-            # Low contrast / diffuse acoustic field - not a distinct directional source
+        if composite_prom < 1.0:
+            # Low contrast / diffuse acoustic field - return angular profile for display, flagged invalid
             return (
-                0.0,
-                0.0,
+                best_bearing_deg,
+                composite_prom,
                 angles_deg,
                 srp_norm,
                 raw_2d_heatmap,
@@ -643,12 +642,12 @@ class SRPPhatEngine:
             )
 
         # Multi-Pair Angular Consensus Gate:
-        # At least 2 pairs must agree with the SRP peak bearing within 15°
-        agreeing_pairs = sum(1 for ang in pair_angles if abs(ang - best_bearing_deg) <= 15.0)
-        if valid_pairs_count >= 2 and agreeing_pairs < 2:
+        # When 3+ pairs are valid, verify at least 2 pairs agree within 25°
+        agreeing_pairs = sum(1 for ang in pair_angles if abs(ang - best_bearing_deg) <= 25.0)
+        if valid_pairs_count >= 3 and agreeing_pairs < 2:
             return (
-                0.0,
-                0.0,
+                best_bearing_deg,
+                composite_prom,
                 angles_deg,
                 srp_norm,
                 raw_2d_heatmap,
@@ -2345,13 +2344,19 @@ class AcousticRadarApp:
                 self.target_line.set_color(marker_color)
                 meas_rad = math.radians(best_bearing)
                 self.meas_needle.set_data([meas_rad, meas_rad], [0, 0.85])
-                self.radar_needle.set_data([target_rad, target_rad], [0, 0.5])
+                self.radar_needle.set_data([target_rad, target_rad], [0, 0.65])
                 self.radar_needle.set_color(marker_color)
             else:
-                self.marker_source.set_data([], [])
-                self.target_line.set_data([], [])
-                self.meas_needle.set_data([], [])
-                self.radar_needle.set_data([], [])
+                # Standby Monitoring: Keep needles and target line visible in high-contrast standby slate
+                marker_color = "#2a4365"
+                self.marker_source.set_data([target_x], [target_y])
+                self.marker_source.set_markeredgecolor(marker_color)
+                self.target_line.set_data([0, target_x], [0, target_y])
+                self.target_line.set_color("#1c2e4a")
+                meas_rad = math.radians(best_bearing)
+                self.meas_needle.set_data([meas_rad, meas_rad], [0, 0.50])
+                self.radar_needle.set_data([target_rad, target_rad], [0, 0.50])
+                self.radar_needle.set_color(marker_color)
 
             # 4b. Dynamic Sound Intensity Side Indicators (Left / Center / Right)
             pct_l = float(side_metrics.get("pct_left", 33.3))
@@ -2391,7 +2396,7 @@ class AcousticRadarApp:
 
             # Incoming Sector HUD Banner
             if not is_source_valid:
-                self.sector_banner_text.set_text("■ QUIET IDLE — NO ACTIVE SOUND DETECTED ■")
+                self.sector_banner_text.set_text("■ AMBIENT MONITORING — READY FOR TARGET SOUND ■")
                 self.sector_banner_text.set_color("#6b7d99")
             elif dom_s == "LEFT":
                 self.sector_banner_text.set_text(f"◄◄ INCOMING SOUND: LEFT FLANK ({target_angle:+.1f}°) | {pct_l:.0f}% INTENSITY")
@@ -2410,14 +2415,24 @@ class AcousticRadarApp:
                 ang_diff = polar_angles_deg - target_angle
                 radar_profile = np.exp(-0.5 * (ang_diff / 8.0) ** 2) * (target_conf / 100.0)
                 self.radar_line.set_data(self.radar_angles, radar_profile)
+                self.radar_line.set_color("#00ffcc" if is_locked else "#ffaa00")
             else:
-                self.radar_line.set_data(self.radar_angles, np.zeros_like(self.radar_angles))
+                ang_diff = polar_angles_deg - target_angle
+                radar_profile = np.exp(-0.5 * (ang_diff / 16.0) ** 2) * 0.18
+                self.radar_line.set_data(self.radar_angles, radar_profile)
+                self.radar_line.set_color("#2a4365")
 
             # 6. SRP-PHAT Angular Profile Plot
-            if is_source_valid and len(srp_norm) > 0 and np.max(srp_norm) > 0.01:
+            if len(srp_norm) > 0 and np.max(srp_norm) > 0.001:
                 self.srp_line.set_data(srp_angles, srp_norm)
                 peak_idx = int(np.argmin(np.abs(srp_angles - best_bearing)))
                 self.srp_peak_marker.set_data([best_bearing], [srp_norm[peak_idx]])
+                if is_source_valid:
+                    self.srp_line.set_color("#00ffcc")
+                    self.srp_peak_marker.set_color("#ff0055")
+                else:
+                    self.srp_line.set_color("#3b82f6")
+                    self.srp_peak_marker.set_color("#475569")
             else:
                 self.srp_line.set_data(srp_angles, np.zeros_like(srp_angles))
                 self.srp_peak_marker.set_data([], [])
