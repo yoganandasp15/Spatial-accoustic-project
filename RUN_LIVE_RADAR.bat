@@ -9,10 +9,13 @@ echo.
 echo Starting Real-Time Acoustic Camera and Multimodal Telemetry Suite...
 echo.
 
+cd /d "%~dp0"
+set PYTHONUNBUFFERED=1
+
 set PYTHON_BIN=C:\Python314\python.exe
 if not exist "%PYTHON_BIN%" set PYTHON_BIN=python
 
-"%PYTHON_BIN%" "%~dp0stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py"
+"%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py"
 if errorlevel 1 (
     echo.
     echo [ERROR] Application exited with error code %ERRORLEVEL%

@@ -30,6 +30,8 @@ from spatial_acoustic_radar_pro import (
     ArrayGeometry,
     PRESETS,
     DynamicTargetTracker,
+    AcousticActivityDetector,
+    MultimodalMotorEngine,
     SPEED_OF_SOUND,
     apply_pair_phase_compensation,
 )
@@ -90,27 +92,37 @@ class TestNoiseGatingRegression(unittest.TestCase):
 
     def test_02_independent_noise_50_frames_zero_false_bearings(self):
         """
-        Critical regression test: 50 independent frames of quiet ambient noise
-        must yield 0 false detections (100% rejection rate).
+        Critical regression test: 50 quiet noise frames AND 50 high-amplitude
+        independent noise frames (RMS up to 0.015, well above energy threshold)
+        must yield 0 false detections (100% rejection rate via spatial coherence).
         """
         np.random.seed(101)
         false_detections = 0
-        total_frames = 50
+        total_frames = 100
 
-        for frame_idx in range(total_frames):
+        # Phase A: 50 frames of quiet noise (sub-threshold)
+        for frame_idx in range(50):
             noise_rms = 0.0008 + 0.0004 * np.random.rand()
             noise = np.random.randn(self.frame_len, 4) * noise_rms
-
             bearing, prom, _, _, _, metrics = SRPPhatEngine.compute_srp_frame(
                 noise, self.fs, self.geometry, min_active_rms=0.0020
             )
+            if metrics["is_valid"]:
+                false_detections += 1
 
+        # Phase B: 50 frames of high-amplitude independent noise (well above threshold)
+        for frame_idx in range(50):
+            noise_rms = 0.0050 + 0.0100 * np.random.rand()  # RMS 0.005 to 0.015
+            noise = np.random.randn(self.frame_len, 4) * noise_rms
+            bearing, prom, _, _, _, metrics = SRPPhatEngine.compute_srp_frame(
+                noise, self.fs, self.geometry, min_active_rms=0.0020
+            )
             if metrics["is_valid"]:
                 false_detections += 1
 
         self.assertEqual(
             false_detections, 0,
-            f"Expected 0 false detections across {total_frames} quiet noise frames, got {false_detections}."
+            f"Expected 0 false detections across {total_frames} independent noise frames, got {false_detections}."
         )
 
     def test_03_weak_noise_below_threshold_gated(self):
@@ -125,69 +137,40 @@ class TestNoiseGatingRegression(unittest.TestCase):
 
     def test_04_sustained_sound_noise_floor_stability(self):
         """
-        Test that active sound does NOT cause noise floor creep that absorbs sustained audio.
-        Simulates 100 frames of loud active sound, followed by 25 frames of silence.
+        Test that production AcousticActivityDetector freezes noise floor adaptation during
+        sustained active sound, preventing noise floor creep, and adapts downward during silence.
         """
-        noise_floor = 0.0015
-        min_active_threshold = 0.0030
-        last_active_time = 0.0
-        hangover_sec = 0.350
+        vad = AcousticActivityDetector(min_active_threshold=0.0030, calib_frames=5, hangover_sec=0.350)
         frame_dt = self.frame_len / self.fs  # ~46.4 ms per frame
-
         sim_time = 1000.0
 
+        # Calibrate initial floor to 0.0015
+        for _ in range(5):
+            sim_time += frame_dt
+            vad.process_frame(0.0015, sim_time)
+
+        initial_floor = vad.noise_floor
+
         # Phase 1: 100 frames of active audio (RMS = 0.025)
-        active_rms = 0.025
         for _ in range(100):
             sim_time += frame_dt
-            attack_thresh = max(min_active_threshold, noise_floor * 1.60)
-            release_thresh = max(0.0020, noise_floor * 1.25)
-
-            if active_rms >= attack_thresh:
-                last_active_time = sim_time
-                is_active = True
-            elif (sim_time - last_active_time) < hangover_sec:
-                is_active = bool(active_rms >= release_thresh)
-            else:
-                is_active = False
-
-            # VAD noise floor adaptation rule: ONLY adapt if not active and quiet > 0.60s
-            if not is_active and (sim_time - last_active_time) > 0.60:
-                if active_rms < noise_floor:
-                    noise_floor = 0.92 * noise_floor + 0.08 * active_rms
-                elif active_rms < noise_floor * 1.30:
-                    noise_floor = 0.995 * noise_floor + 0.005 * active_rms
-
+            is_active, floor, attack = vad.process_frame(0.025, sim_time)
             self.assertTrue(is_active, "Audio must remain continuously active during sustained sound.")
             self.assertAlmostEqual(
-                noise_floor, 0.0015, delta=1e-5,
-                msg="Noise floor must remain frozen and not creep upward during active sound."
+                floor, initial_floor, delta=1e-5,
+                msg="Noise floor must remain strictly frozen and not creep upward during active sound."
             )
 
-        # Phase 2: 25 frames of silence (RMS = 0.0010)
-        quiet_rms = 0.0010
+        # Phase 2: 25 frames of silence (RMS = 0.0008)
         adapted_during_quiet = False
-        initial_floor = noise_floor
         for _ in range(25):
             sim_time += frame_dt
-            attack_thresh = max(min_active_threshold, noise_floor * 1.60)
-            release_thresh = max(0.0020, noise_floor * 1.25)
-
-            if quiet_rms >= attack_thresh:
-                last_active_time = sim_time
-                is_active = True
-            elif (sim_time - last_active_time) < hangover_sec:
-                is_active = bool(quiet_rms >= release_thresh)
-            else:
-                is_active = False
-
-            if not is_active and (sim_time - last_active_time) > 0.60:
-                if quiet_rms < noise_floor:
-                    noise_floor = 0.92 * noise_floor + 0.08 * quiet_rms
-                    adapted_during_quiet = True
+            is_active, floor, attack = vad.process_frame(0.0008, sim_time)
+            if floor < initial_floor:
+                adapted_during_quiet = True
 
         self.assertTrue(adapted_during_quiet, "Noise floor should adapt downward during confirmed quiet intervals.")
-        self.assertLess(noise_floor, initial_floor, "Noise floor should track down toward quiet ambient RMS.")
+        self.assertLess(vad.noise_floor, initial_floor, "Noise floor should track down toward quiet ambient RMS.")
 
     def test_05_known_bearings_accuracy(self):
         """
@@ -280,6 +263,42 @@ class TestNoiseGatingRegression(unittest.TestCase):
                 tracked_angles[i], tracked_angles[i - 1] - 0.5,
                 f"Tracker output dropped backwards at step {i}: {tracked_angles[i-1]:.1f}° -> {tracked_angles[i]:.1f}°."
             )
+
+    def test_09_vibration_velocity_rms_parseval_accuracy(self):
+        """
+        Test that MultimodalMotorEngine calculates ISO vibration velocity RMS via Parseval
+        spectral energy integration within <1.0% error of theoretical physics (2.2073 mm/s).
+        Signal: 25.0 Hz sine wave with amplitude 0.050g at 400 Hz sampling rate.
+        Theoretical:
+          A0 = 0.050 * 9806.65 mm/s^2
+          V0 = A0 / (2 * pi * 25.0) = 3.1216 mm/s
+          v_rms = V0 / sqrt(2) = 2.2073 mm/s
+        """
+        engine = MultimodalMotorEngine(pulses_per_rev=1)
+        fs_vib = 400.0
+        n_pts = 256
+        t_arr = np.arange(n_pts) / fs_vib
+        f0 = 25.0
+        a0_g = 0.050
+
+        # Sine on X, pure static gravity on Z
+        ax = a0_g * np.sin(2.0 * np.pi * f0 * t_arr)
+        ay = np.zeros(n_pts)
+        az = -0.82 * np.ones(n_pts)
+        vib_hist = (t_arr, ax, ay, az)
+
+        # Mock silent audio frame
+        dummy_audio = np.zeros((512, 4), dtype=np.float32)
+        diag = engine.analyze(dummy_audio, 16000.0, 0.0, 0.0, -0.82, rpm=1500.0, vib_history=vib_hist)
+
+        v_rms_est = diag.get("v_rms_mms", 0.0)
+        v_rms_theory = (a0_g * 9806.65 / (2.0 * np.pi * f0)) / np.sqrt(2.0)
+        pct_err = abs(v_rms_est - v_rms_theory) / v_rms_theory * 100.0
+
+        self.assertLess(
+            pct_err, 1.0,
+            f"Parseval velocity RMS error must be < 1.0% (Theory: {v_rms_theory:.4f} mm/s, Est: {v_rms_est:.4f} mm/s, Error: {pct_err:.2f}%)."
+        )
 
 
 if __name__ == "__main__":

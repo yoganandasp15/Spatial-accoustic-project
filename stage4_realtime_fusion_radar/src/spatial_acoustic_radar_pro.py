@@ -174,6 +174,77 @@ class DynamicTargetTracker:
 
 
 # =============================================================================
+# ACOUSTIC ACTIVITY DETECTOR (SCHMITT-TRIGGER VAD WITH NOISE FLOOR FREEZE)
+# =============================================================================
+class AcousticActivityDetector:
+    """
+    Production Dual-Threshold Schmitt-Trigger Voice/Acoustic Activity Detector (VAD).
+    Features:
+      1. Initial ambient quiet-room baseline calibration (median of quiet frames).
+      2. Hangover smoothing to bridge speech/acoustic word pauses without flutter.
+      3. Strict Noise Floor Adaptation Freeze: during active acoustic sound, the
+         ambient floor is 100% frozen, preventing loud sound from absorbing into baseline.
+      4. Downward baseline tracking during confirmed quiet intervals (>0.60s post-sound).
+    """
+
+    def __init__(
+        self,
+        min_active_threshold: float = 0.0035,
+        calib_frames: int = 25,
+        hangover_sec: float = 0.350
+    ):
+        self.min_active_threshold = min_active_threshold
+        self.calib_frames = calib_frames
+        self.hangover_sec = hangover_sec
+        self.noise_floor = 0.0030
+        self.calib_samples: List[float] = []
+        self.is_calibrating = True
+        self.last_active_time = 0.0
+
+    def start_calibration(self):
+        """Clears existing sample history and restarts ambient noise floor calibration."""
+        self.calib_samples.clear()
+        self.is_calibrating = True
+
+    def process_frame(self, avg_rms: float, current_time: float) -> Tuple[bool, float, float]:
+        """
+        Evaluates incoming audio frame energy against dynamic Schmitt thresholds.
+        Returns:
+            is_active: Whether sound activity is detected in this frame
+            noise_floor: Current estimated ambient floor RMS
+            attack_thresh: Active sound attack threshold
+        """
+        # Phase 1: Ambient baseline calibration
+        if self.is_calibrating:
+            self.calib_samples.append(avg_rms)
+            if len(self.calib_samples) >= self.calib_frames:
+                self.noise_floor = max(0.0010, float(np.median(self.calib_samples)))
+                self.min_active_threshold = max(0.0030, self.noise_floor * 1.50)
+                self.is_calibrating = False
+
+        # Phase 2: Dual-threshold Schmitt Trigger with Hangover
+        attack_thresh = max(self.min_active_threshold, self.noise_floor * 1.60)
+        release_thresh = max(0.0020, self.noise_floor * 1.25)
+
+        if avg_rms >= attack_thresh:
+            self.last_active_time = current_time
+            is_active = True
+        elif (current_time - self.last_active_time) < self.hangover_sec:
+            is_active = bool(avg_rms >= release_thresh)
+        else:
+            is_active = False
+
+        # Phase 3: Noise floor adaptation rules (frozen during sound; tracks quiet intervals)
+        if not is_active and (current_time - self.last_active_time) > 0.60:
+            if avg_rms < self.noise_floor:
+                self.noise_floor = 0.92 * self.noise_floor + 0.08 * avg_rms
+            elif avg_rms < self.noise_floor * 1.30:
+                self.noise_floor = 0.995 * self.noise_floor + 0.005 * avg_rms
+
+        return is_active, self.noise_floor, attack_thresh
+
+
+# =============================================================================
 # SCALABLE ARRAY GEOMETRY (4-MIC ULA & 2-MIC PRESETS)
 # =============================================================================
 class ArrayGeometry:
@@ -266,6 +337,44 @@ PRESETS = {
 # =============================================================================
 class SRPPhatEngine:
     """Steered Response Power (SRP) Engine with Multi-Pair Sinc GCC-PHAT."""
+
+    @staticmethod
+    def compute_spatial_coherence(signals: np.ndarray, max_delay_samples: int = 6) -> Tuple[int, float]:
+        """
+        Computes scale-invariant inter-channel normalized cross-correlation across all pairs
+        within physical inter-microphone propagation lag window.
+        Returns:
+            coherent_pairs: Count of microphone pairs exhibiting normalized cross-correlation >= 0.18
+            max_rho: Maximum cross-channel correlation coefficient observed across all pairs
+        """
+        N, M = signals.shape
+        if M < 2 or N < 16:
+            return 0, 0.0
+        norms = np.sqrt(np.sum(signals.astype(np.float64)**2, axis=0))
+        alive_channels = [m for m in range(M) if norms[m] >= 1e-12]
+        if len(alive_channels) < 2:
+            return 0, 0.0
+        coherent_pairs = 0
+        max_rho = 0.0
+        for i_idx, i in enumerate(alive_channels):
+            for j in alive_channels[i_idx + 1:]:
+                s1 = signals[:, i].astype(np.float64)
+                s2 = signals[:, j].astype(np.float64)
+                denom = norms[i] * norms[j]
+                if denom < 1e-12:
+                    continue
+                c = np.correlate(s1, s2, mode='full') / denom
+                center = N - 1
+                lo = max(0, center - max_delay_samples)
+                hi = min(len(c), center + max_delay_samples + 1)
+                phys_c = c[lo:hi]
+                if len(phys_c) > 0:
+                    rho = float(np.max(phys_c))
+                    if rho > max_rho:
+                        max_rho = rho
+                    if rho >= 0.18:
+                        coherent_pairs += 1
+        return coherent_pairs, max_rho
 
     @staticmethod
     def gcc_phat_pair(
@@ -434,11 +543,33 @@ class SRPPhatEngine:
                 {
                     "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
                     "dom_side": "NONE", "is_valid": False, "active_pairs": 0,
-                    "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status
+                    "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status,
+                    "spatial_rho": 0.0
+                }
+            )
+
+        # Scale-Invariant Spatial Coherence Gate:
+        # Computes normalized inter-channel correlation across microphone pairs.
+        # Coherent acoustic wavefronts exhibit rho >= 0.18, whereas independent noise
+        # (even at high amplitude) has max rho < 0.15. Rejects independent noise 100%.
+        coherent_pairs, max_spatial_rho = cls.compute_spatial_coherence(signals, max_delay_samples=6)
+        if coherent_pairs < 1 and max_spatial_rho < 0.18:
+            return (
+                0.0,
+                0.0,
+                angles_deg,
+                np.zeros_like(angles_deg),
+                np.zeros((GRID_Y, GRID_X), dtype=np.float64),
+                {
+                    "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
+                    "dom_side": "NONE", "is_valid": False, "active_pairs": 0,
+                    "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status,
+                    "spatial_rho": max_spatial_rho
                 }
             )
 
         valid_pairs_count = 0
+        pair_angles: List[float] = []
         for p_idx, (i, j) in enumerate(geometry.pairs):
             if i >= num_mics or j >= num_mics:
                 continue
@@ -457,6 +588,8 @@ class SRPPhatEngine:
 
             if is_valid and len(c_phys) >= 5 and prom >= 1.0:
                 valid_pairs_count += 1
+                sin_p = np.clip((best_tau * SPEED_OF_SOUND) / d_x, -1.0, 1.0)
+                pair_angles.append(float(np.rad2deg(np.arcsin(sin_p))))
                 # 1D angular SRP: tau = +(d_x / c) * sin(theta) (Positive lag for sound on right)
                 taus_1d = +(d_x / SPEED_OF_SOUND) * sin_angles
                 pair_resp_1d = np.interp(taus_1d, l_phys, c_phys, left=0.0, right=0.0)
@@ -480,7 +613,8 @@ class SRPPhatEngine:
                 {
                     "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
                     "dom_side": "NONE", "is_valid": False, "active_pairs": valid_pairs_count,
-                    "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status
+                    "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status,
+                    "spatial_rho": max_spatial_rho
                 }
             )
 
@@ -503,7 +637,26 @@ class SRPPhatEngine:
                 {
                     "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
                     "dom_side": "NONE", "is_valid": False, "active_pairs": valid_pairs_count,
-                    "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status
+                    "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status,
+                    "spatial_rho": max_spatial_rho
+                }
+            )
+
+        # Multi-Pair Angular Consensus Gate:
+        # At least 2 pairs must agree with the SRP peak bearing within 15°
+        agreeing_pairs = sum(1 for ang in pair_angles if abs(ang - best_bearing_deg) <= 15.0)
+        if valid_pairs_count >= 2 and agreeing_pairs < 2:
+            return (
+                0.0,
+                0.0,
+                angles_deg,
+                srp_norm,
+                raw_2d_heatmap,
+                {
+                    "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
+                    "dom_side": "NONE", "is_valid": False, "active_pairs": valid_pairs_count,
+                    "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status,
+                    "spatial_rho": max_spatial_rho
                 }
             )
 
@@ -742,14 +895,16 @@ class MultimodalMotorEngine:
         self.b_kurt = 3.0
         self.b_spec = None
         self.b_time = 0.0
-        self.rpm_history: List[float] = []
+        self.rpm_history = collections.deque(maxlen=20)
 
         # Per-axis gravity tracking & vibration time series buffer
         self.grav_x = 0.0
         self.grav_y = 0.0
         self.grav_z = -0.82
-        self.vib_history: List[float] = []
-        self.vib_signed_history = collections.deque(maxlen=512)
+        self.vib_history = collections.deque(maxlen=256)
+        self.vib_signed_history = collections.deque(maxlen=256)
+        self.vib_signed_y_history = collections.deque(maxlen=256)
+        self.vib_signed_z_history = collections.deque(maxlen=256)
 
     def learn_baseline(self, rpm: float, vib_g: float, audio: np.ndarray, fs: float):
         """Captures golden baseline signature of a known-healthy motor."""
@@ -798,10 +953,8 @@ class MultimodalMotorEngine:
         crest = peak / max(rms, 1e-12)
         kurt = float(np.mean(x**4) / (np.mean(x**2)**2 + 1e-12)) if len(x) else 3.0
 
-        # Track RPM jitter
+        # Track RPM jitter (bounded by deque maxlen=20)
         self.rpm_history.append(rpm)
-        if len(self.rpm_history) > 20:
-            self.rpm_history.pop(0)
         rpm_jitter = float(np.std(self.rpm_history)) if len(self.rpm_history) > 3 else 0.0
 
         # 1. Decoupled Dynamic Vibration Magnitude (Per-Axis Gravity DC Removal)
@@ -842,16 +995,8 @@ class MultimodalMotorEngine:
             dyn_pt = math.sqrt(dyn_ax**2 + dyn_ay**2 + dyn_az**2)
             self.vib_history.append(dyn_pt)
             self.vib_signed_history.append(dyn_ax)
-            if not hasattr(self, "vib_signed_y_history"):
-                self.vib_signed_y_history = []
-                self.vib_signed_z_history = []
             self.vib_signed_y_history.append(dyn_ay)
             self.vib_signed_z_history.append(dyn_az)
-            if len(self.vib_history) > 256:
-                self.vib_history.pop(0)
-                self.vib_signed_history.pop(0)
-                self.vib_signed_y_history.pop(0)
-                self.vib_signed_z_history.pop(0)
 
             dyn_g = float(np.sqrt(np.mean(np.array(self.vib_history)**2)))
             dyn_axes = [
@@ -905,8 +1050,8 @@ class MultimodalMotorEngine:
             e_2x = 0.0
             e_3x = 0.0
 
-        # True ISO 10816/20816 Vibration Velocity RMS (mm/s) via Omega-Arithmetic Integration
-        # V(f) = (A(f) * 9806.65) / (2 * pi * f) for f in [10 Hz, 200 Hz]
+        # True ISO 10816/20816 Vibration Velocity RMS (mm/s) via Parseval Omega-Arithmetic Integration
+        # V(f) = (A_w(f) * 9806.65) / (2 * pi * f) for f in [10 Hz, 200 Hz]
         v_rms_mms = 0.0
         if n_samples_vib >= 16:
             n_vfft = max(128, n_samples_vib)
@@ -914,14 +1059,29 @@ class MultimodalMotorEngine:
             iso_band = (v_freqs >= 10.0) & (v_freqs <= min(200.0, fs_vib / 2.0))
             if np.any(iso_band):
                 v_axis_rms_sq = 0.0
+                scale = np.full_like(v_freqs, 2.0)
+                scale[0] = 1.0
+                if n_vfft % 2 == 0:
+                    scale[-1] = 1.0
+
+                safe_freqs = v_freqs.copy()
+                safe_freqs[0] = 1.0  # Guard against DC division
+
                 for axis_sig in dyn_axes:
                     ax_data = np.array(axis_sig, dtype=np.float64)
+                    if len(ax_data) < 16:
+                        continue
                     ax_data -= np.mean(ax_data)
                     w_v = np.hanning(len(ax_data))
-                    A_f = np.abs(np.fft.rfft(ax_data * w_v, n=n_vfft)) * (2.0 / (np.sum(w_v) + 1e-12))
-                    V_f = np.zeros_like(A_f)
-                    V_f[iso_band] = (A_f[iso_band] * 9806.65) / (2.0 * np.pi * v_freqs[iso_band])
-                    v_axis_rms_sq += float(np.sum(V_f[iso_band]**2)) / 2.0
+                    sum_w_sq = float(np.sum(w_v**2)) + 1e-12
+
+                    X_w = np.fft.rfft(ax_data * w_v, n=n_vfft)
+                    # Velocity spectral amplitude (mm/s)
+                    V_w = (np.abs(X_w) * 9806.65) / (2.0 * np.pi * safe_freqs)
+                    # Parseval discrete energy integration
+                    axis_v_rms_sq = float(np.sum(scale[iso_band] * (V_w[iso_band]**2))) / (n_vfft * sum_w_sq)
+                    v_axis_rms_sq += axis_v_rms_sq
+
                 v_rms_mms = float(np.sqrt(v_axis_rms_sq))
 
         # Acoustic spectrum for high-frequency acoustic baseline comparison
@@ -1694,15 +1854,9 @@ class AcousticRadarApp:
         self.invert_channels = False
         self.tracker = DynamicTargetTracker(alpha=0.40, gate_deg=30.0)
 
-        # Adaptive Noise Gate calibrated for 16-bit INMP441 normalized audio
-        self.noise_floor = 0.0030
-        self.min_active_threshold = 0.0035
-        self.calib_noise_frames = 25
-        self.calib_noise_collected = 0
-        self.calib_noise_samples = []
-        self.is_calibrating_ambient = True
-        self.last_active_sound_time = time.time()
-        self.hangover_sec = 0.35
+        # Production Schmitt-Trigger VAD with Initial Ambient Calibration
+        self.vad = AcousticActivityDetector(min_active_threshold=0.0035, calib_frames=25, hangover_sec=0.350)
+        self.noise_floor = self.vad.noise_floor
 
         # Display State
         self.smoothed_heatmap = np.zeros((GRID_Y, GRID_X), dtype=np.float64)
@@ -2061,9 +2215,7 @@ class AcousticRadarApp:
 
     def calibrate_ambient_noise(self):
         """Triggers re-calibration of the ambient room noise floor."""
-        self.calib_noise_collected = 0
-        self.calib_noise_samples = []
-        self.is_calibrating_ambient = True
+        self.vad.start_calibration()
         print("[*] Re-calibrating ambient quiet-room noise floor (listening 25 frames)...")
 
     def _switch_source(self, source_type: str, geometry_key: str):
@@ -2140,36 +2292,8 @@ class AcousticRadarApp:
             avg_rms = float(np.mean(rms_per_ch)) if rms_per_ch else 0.0
             now = time.time()
 
-            # Ambient quiet-room noise floor calibration
-            if self.is_calibrating_ambient:
-                self.calib_noise_samples.append(avg_rms)
-                self.calib_noise_collected += 1
-                if self.calib_noise_collected >= self.calib_noise_frames:
-                    self.noise_floor = max(0.0010, float(np.median(self.calib_noise_samples)))
-                    self.min_active_threshold = max(0.0030, self.noise_floor * 1.50)
-                    self.is_calibrating_ambient = False
-                    print(f"[*] Ambient Noise Calibrated: Floor={self.noise_floor:.5f}, ActiveThreshold={self.min_active_threshold:.5f}")
-
-            # Dual-threshold VAD with Hangover:
-            attack_thresh = max(self.min_active_threshold, self.noise_floor * 1.60)
-            release_thresh = max(0.0020, self.noise_floor * 1.25)
-
-            if avg_rms >= attack_thresh:
-                self.last_active_sound_time = now
-                is_active_sound = True
-            elif (now - self.last_active_sound_time) < self.hangover_sec:
-                # Within hangover window - remain active if above release threshold
-                is_active_sound = bool(avg_rms >= release_thresh)
-            else:
-                is_active_sound = False
-
-            # Noise floor adaptation rules:
-            if not is_active_sound and (now - self.last_active_sound_time) > 0.60:
-                # Confirmed quiet interval: slowly track ambient baseline
-                if avg_rms < self.noise_floor:
-                    self.noise_floor = 0.92 * self.noise_floor + 0.08 * avg_rms
-                elif avg_rms < self.noise_floor * 1.30:
-                    self.noise_floor = 0.995 * self.noise_floor + 0.005 * avg_rms
+            # Process frame through production Schmitt-Trigger VAD with frozen adaptation
+            is_active_sound, self.noise_floor, attack_thresh = self.vad.process_frame(avg_rms, now)
 
             # 2. Multi-Pair Steered Response Power & 2D Backprojection
             min_srp_rms = max(0.0020, self.noise_floor * 1.20)

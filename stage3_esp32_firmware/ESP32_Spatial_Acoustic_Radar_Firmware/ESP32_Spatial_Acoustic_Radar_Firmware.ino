@@ -75,7 +75,7 @@ static int32_t dma_rx1[CHUNK_FRAMES * 2];
 // Telemetry state
 volatile uint32_t tach_pulse_count = 0;
 volatile int64_t last_tach_isr_us = 0;
-#define TACH_DEBOUNCE_US 2500  // Refractory debounce window (max 24,000 RPM for 1-slot disc)
+#define TACH_DEBOUNCE_US 200  // Refractory debounce window (max 5,000 Hz: 15,000 RPM for 20-slot disc, 300,000 RPM for 1-slot)
 bool adxl_present = false;
 bool continuous_streaming = true;
 uint16_t packet_seq = 0;
@@ -130,10 +130,7 @@ bool init_adxl345() {
 
 uint8_t read_adxl_fifo(AccelSample *out_buf, uint8_t max_samples) {
     if (!adxl_present) {
-        out_buf[0].x_mg = 0;
-        out_buf[0].y_mg = 0;
-        out_buf[0].z_mg = -820;
-        return 1;
+        return 0;  // Truthful 0 samples: never inject fabricated accelerometer readings
     }
 
     Wire.beginTransmission(ADXL345_ADDR);
@@ -334,7 +331,7 @@ void loop() {
             hdr.sample_rate = SAMPLE_RATE;
             hdr.block_frames = CHUNK_FRAMES;
             hdr.num_vib = num_vib;
-            hdr.reserved = 0x00;
+            hdr.reserved = adxl_present ? 0x01 : 0x00; // Bit 0: ADXL345 Hardware Healthy / Connected
             hdr.tach_pulses = pulses;
 
             // 16-bit XOR Checksum across header, vibration payload, and audio chunk
