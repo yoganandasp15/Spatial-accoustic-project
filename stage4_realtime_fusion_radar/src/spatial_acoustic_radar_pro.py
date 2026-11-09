@@ -511,7 +511,8 @@ class SRPPhatEngine:
         signals: np.ndarray,
         fs: float,
         geometry: ArrayGeometry,
-        min_active_rms: float = 0.0020
+        min_active_rms: float = 0.0020,
+        calib_gains: Optional[np.ndarray] = None
     ) -> Tuple[float, float, np.ndarray, np.ndarray, np.ndarray, Dict[str, object]]:
         """
         Steered Response Power (SRP) bearing estimation AND True 2D Acoustic Camera Backprojection.
@@ -532,9 +533,11 @@ class SRPPhatEngine:
         raw_2d_heatmap = np.zeros((GRID_Y, GRID_X), dtype=np.float64)
         pair_prominences = []
 
-        # 1. Per-Channel Health & Signal Strength Diagnostics
+        # 1. Per-Channel Health & Signal Strength Diagnostics (Raw & Sensitivity-Calibrated)
         ch_rms = [float(np.sqrt(np.mean(signals[:, m]**2))) for m in range(num_mics)]
         ch_peak = [float(np.max(np.abs(signals[:, m]))) for m in range(num_mics)]
+        gains = calib_gains if calib_gains is not None else PRELIM_MIC_SENSITIVITY_GAINS[:num_mics]
+        calib_ch_rms = [ch_rms[m] * float(gains[m]) if m < len(gains) else ch_rms[m] for m in range(num_mics)]
         avg_rms = float(np.mean(ch_rms)) if ch_rms else 0.0
 
         ch_status = []
@@ -560,7 +563,7 @@ class SRPPhatEngine:
                 {
                     "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
                     "dom_side": "NONE", "is_valid": False, "active_pairs": 0,
-                    "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status,
+                    "avg_rms": avg_rms, "ch_rms": ch_rms, "calib_ch_rms": calib_ch_rms, "ch_status": ch_status,
                     "spatial_rho": 0.0, "status": "BELOW_ENERGY_GATE"
                 }
             )
@@ -580,7 +583,7 @@ class SRPPhatEngine:
                 {
                     "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
                     "dom_side": "NONE", "is_valid": False, "active_pairs": 0,
-                    "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status,
+                    "avg_rms": avg_rms, "ch_rms": ch_rms, "calib_ch_rms": calib_ch_rms, "ch_status": ch_status,
                     "spatial_rho": max_spatial_rho, "status": "LOW_SPATIAL_COHERENCE"
                 }
             )
@@ -632,7 +635,7 @@ class SRPPhatEngine:
                 {
                     "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
                     "dom_side": "NONE", "is_valid": False, "active_pairs": valid_pairs_count,
-                    "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status,
+                    "avg_rms": avg_rms, "ch_rms": ch_rms, "calib_ch_rms": calib_ch_rms, "ch_status": ch_status,
                     "spatial_rho": max_spatial_rho, "status": "NO_VALID_GCC_PAIRS"
                 }
             )
@@ -656,7 +659,7 @@ class SRPPhatEngine:
                 {
                     "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
                     "dom_side": "NONE", "is_valid": False, "active_pairs": valid_pairs_count,
-                    "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status,
+                    "avg_rms": avg_rms, "ch_rms": ch_rms, "calib_ch_rms": calib_ch_rms, "ch_status": ch_status,
                     "spatial_rho": max_spatial_rho, "status": "LOW_ANGULAR_CONTRAST"
                 }
             )
@@ -674,7 +677,7 @@ class SRPPhatEngine:
                 {
                     "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
                     "dom_side": "NONE", "is_valid": False, "active_pairs": valid_pairs_count,
-                    "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status,
+                    "avg_rms": avg_rms, "ch_rms": ch_rms, "calib_ch_rms": calib_ch_rms, "ch_status": ch_status,
                     "spatial_rho": max_spatial_rho, "status": "PAIR_ANGLE_DISAGREEMENT"
                 }
             )
@@ -690,6 +693,19 @@ class SRPPhatEngine:
         p_l = float(np.sum(contrast[l_mask])) if np.any(l_mask) else 0.0
         p_c = float(np.sum(contrast[c_mask])) if np.any(c_mask) else 0.0
         p_r = float(np.sum(contrast[r_mask])) if np.any(r_mask) else 0.0
+
+        # Calibrated Physical Flank Amplitude Weighting:
+        # Fuses SRP angular contrast with calibrated microphone pair energy balance
+        # (Left mics: M1, M2; Right mics: M3, M4)
+        if len(calib_ch_rms) >= 4:
+            e_left = 0.5 * (calib_ch_rms[0]**2 + calib_ch_rms[1]**2) + 1e-12
+            e_right = 0.5 * (calib_ch_rms[2]**2 + calib_ch_rms[3]**2) + 1e-12
+            e_tot_calib = e_left + e_right
+            w_left = (e_left / e_tot_calib) * 2.0
+            w_right = (e_right / e_tot_calib) * 2.0
+            p_l *= (0.70 + 0.30 * w_left)
+            p_r *= (0.70 + 0.30 * w_right)
+
         p_tot = p_l + p_c + p_r + 1e-12
 
         pct_left = (p_l / p_tot) * 100.0
@@ -712,6 +728,7 @@ class SRPPhatEngine:
             "active_pairs": valid_pairs_count,
             "avg_rms": avg_rms,
             "ch_rms": ch_rms,
+            "calib_ch_rms": calib_ch_rms,
             "ch_status": ch_status,
             "spatial_rho": max_spatial_rho,
             "status": "LOCALIZED"
@@ -2120,7 +2137,7 @@ class AcousticRadarApp:
         self.ax_map.set_xlim(X_MIN, X_MAX)
         self.ax_map.set_ylim(Y_MIN, Y_MAX)
         self.ax_map.set_xlabel("Left / Right Offset (m)", color="#b8c2d1", fontsize=11)
-        self.ax_map.set_ylabel("Range in Front of Array (m)", color="#b8c2d1", fontsize=11)
+        self.ax_map.set_ylabel("Illustrative Backprojection Distance (m) [DOA Ray]", color="#b8c2d1", fontsize=10)
         self.ax_map.set_title("2D ACOUSTIC CAMERA (DOA θ-FOCUS RADIAL BACKPROJECTION)", color="#ffffff", fontsize=11, pad=10, weight="bold")
         self.ax_map.tick_params(colors="#b8c2d1")
         self.ax_map.legend(loc="upper right", facecolor="#101726", edgecolor="#2a3b5c", fontsize=9)
@@ -2409,10 +2426,16 @@ class AcousticRadarApp:
             if self.apply_calibration and abs(self.calib_delay_sec) > 1e-12 and raw_frame.shape[1] >= 4:
                 raw_frame = apply_pair_phase_compensation(raw_frame, fs, self.calib_delay_sec)
 
-            # 1. Update 4-Channel Live Waveforms & VU Badges
+            # 1. Update 4-Channel Live Waveforms & Sensitivity-Calibrated VU Badges
+            # Create a separate floating-point calibrated amplitude array:
+            # Raw audio (raw_frame) is strictly preserved unscaled for GCC-PHAT & SRP-PHAT phase correlation.
+            gains_vec = PRELIM_MIC_SENSITIVITY_GAINS[:channels].reshape(1, -1)
+            calib_audio_4ch = raw_frame * gains_vec
+
             n_samples = min(raw_frame.shape[0], 512)
             x_axis = np.arange(n_samples)
             rms_per_ch = []
+            rms_calib_per_ch = []
             pk_per_ch = []
 
             for i in range(4):
@@ -2424,21 +2447,25 @@ class AcousticRadarApp:
                     rms_per_ch.append(r_val)
                     pk_per_ch.append(p_val)
 
+                    gain = float(PRELIM_MIC_SENSITIVITY_GAINS[i]) if i < len(PRELIM_MIC_SENSITIVITY_GAINS) else 1.0
+                    r_calib = r_val * gain
+                    rms_calib_per_ch.append(r_calib)
+
                     # Offset vertically for clean stacking: M1 at +3, M2 at +1, M3 at -1, M4 at -3
                     y_offset = 3.0 - i * 2.0
                     scaled_wave = np.clip(sig_ac * 1.8, -0.85, 0.85) + y_offset
                     self.wave_lines[i].set_data(x_axis, scaled_wave)
 
-                    dbfs = 20.0 * math.log10(max(r_val, 1e-5))
-                    gain = float(PRELIM_MIC_SENSITIVITY_GAINS[i]) if i < len(PRELIM_MIC_SENSITIVITY_GAINS) else 1.0
-                    r_calib = r_val * gain
+                    dbfs_calib = 20.0 * math.log10(max(r_calib, 1e-5))
                     status_str = "ACTIVE" if (r_val > 0.0018 or r_calib > 0.0030) else "QUIET "
-                    self.vu_texts[i].set_text(f"M{i+1}: RMS={r_val:.4f} ({dbfs:+.1f}dB) | {status_str}")
+                    # Display calibrated RMS while retaining raw RMS for diagnostic inspection
+                    self.vu_texts[i].set_text(f"M{i+1}: RMS={r_calib:.4f} ({dbfs_calib:+.1f}dB | raw:{r_val:.4f}) | {status_str}")
                 else:
                     self.wave_lines[i].set_data([], [])
                     self.vu_texts[i].set_text(f"M{i+1}: [DISABLED]")
 
             avg_rms = float(np.mean(rms_per_ch)) if rms_per_ch else 0.0
+            avg_calib_rms = float(np.mean(rms_calib_per_ch)) if rms_calib_per_ch else avg_rms
             now = time.time()
 
             # RMS VAD gives ambient status, but a contaminated startup baseline must not
@@ -2447,7 +2474,7 @@ class AcousticRadarApp:
 
             min_srp_rms = 0.0020
             best_bearing, composite_prom, srp_angles, srp_norm, raw_2d_heatmap, side_metrics = (
-                SRPPhatEngine.compute_srp_frame(raw_frame, fs, self.geometry, min_active_rms=min_srp_rms)
+                SRPPhatEngine.compute_srp_frame(raw_frame, fs, self.geometry, min_active_rms=min_srp_rms, calib_gains=PRELIM_MIC_SENSITIVITY_GAINS)
             )
 
             is_audio_energy_present = bool(avg_rms >= min_srp_rms)
@@ -2523,7 +2550,8 @@ class AcousticRadarApp:
             dom_s = str(side_metrics.get("dom_side", "NONE"))
 
             if is_source_valid:
-                rms_rel = max(0.0, avg_rms - self.noise_floor) / max(0.015, self.noise_floor * 3.0)
+                # Use calibrated RMS for physical acoustic intensity rails
+                rms_rel = max(0.0, avg_calib_rms - self.noise_floor) / max(0.015, self.noise_floor * 3.0)
                 rms_scale = min(1.0, math.sqrt(min(1.0, max(0.05, rms_rel))))
                 intensity_l = float(min(1.0, (pct_l / 100.0) * rms_scale * 1.35))
                 intensity_r = float(min(1.0, (pct_r / 100.0) * rms_scale * 1.35))

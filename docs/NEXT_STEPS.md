@@ -89,14 +89,14 @@ While the entire algorithmic pipeline, firmware binary framing, serial receiver,
 ## 3. Checklist for Users and Evaluators
 
 ### 3.1 Execute the Automated Unit & Adversarial Test Suite
-To verify all 44 unit, protocol, adversarial stress, and anti-tautology tests in 1 second:
+To verify all 55 unit, protocol, adversarial stress, and anti-tautology tests:
 ```powershell
 # From the repository root:
 python -m unittest discover -s tests -p "test_*.py" -v
 # Or run the batch launcher:
 .\RUN_UNIT_TESTS.bat
 ```
-Expected output: `Ran 44 tests in ~1.05s. OK (skipped=1)`. (The single skipped test is the segregated physical hardware ping test, which requires connected hardware).
+Expected output: `Ran 55 tests in ~2.6s. OK (skipped=1)`. (The single skipped test is the segregated physical hardware ping test, which requires connected hardware).
 
 ### 3.2 Verify ESP32 Firmware Compilation
 To verify that the continuous 400 Hz Stream FIFO firmware compiles cleanly:

@@ -8,7 +8,7 @@
 * **MCU Board:** Classic ESP32 DevKit (ESP32-WROOM-32, 38-pin / 30-pin layout, dual-core @ 240 MHz).
 * **Acoustic Array:** 4x INMP441 MEMS digital microphones configured in a Uniform Linear Array (ULA) spaced at $d = 20.32\text{ mm}$ (8 breadboard slots, total aperture $60.96\text{ mm}$).
 * **Vibration Sensor:** ADXL345 3-axis digital accelerometer breakout configured in I2C mode with 400 Hz Stream FIFO.
-* **Tachometer:** FC-03 slotted optical interrupter module (3.3V supply, digital pulse output with 2500 µs ISR refractory debounce).
+* **Tachometer:** FC-03 slotted optical interrupter module (3.3V supply, digital pulse output with 200 µs ISR refractory debounce filter).
 * **Motor Under Test:** Safe, low-voltage small DC motor with optical encoder disc.
 
 ---
@@ -39,7 +39,7 @@
 ### 2.3 FC-03 Optical Tachometer
 * **VCC:** 3.3V
 * **GND:** Ground
-* **DO (Digital Out):** D4 (GPIO 4) configured with `FALLING` hardware interrupt service routine (`fc03_isr`) with `INPUT_PULLUP` and 200 µs refractory debounce filter (supporting up to 5,000 pulses/sec = 15,000 RPM at 20 PPR, or 300,000 RPM at 1 PPR), matching active-low optical blade entry. Live pin state is monitored via `digitalRead(FC03_DO_PIN)` in diagnostic mode (`X` key).
+* **DO (Digital Out):** D4 (GPIO 4) configured with `FALLING` hardware interrupt service routine (`fc03_isr`) with `INPUT_PULLUP` and 200 µs refractory debounce filter (supporting up to 5,000 pulses/sec = 15,000 RPM at 20 PPR, or 300,000 RPM at 1 PPR), matching active-low optical blade entry. (Firmware is configured for FALLING edge matching active-low blade occlusion; physical shaft rotation test will confirm optical disc polarity). Live pin state is monitored via `digitalRead(FC03_DO_PIN)` in diagnostic mode (`X` key).
 * **AO (Analog Out):** Unconnected / Not needed.
 
 ---
@@ -62,7 +62,7 @@
   * True ISO 10816-1 velocity RMS ($v_{\text{rms}}$ in mm/s) is computed via frequency-domain $\omega$-arithmetic integration in the 10 Hz – 200 Hz band.
 * **Phase Alignment & Inter-DMA Calibration:**
   * Master/Slave shared bit-clock (GPIO 18) and word-select (GPIO 21) eliminate sample-clock drift (0 PPM).
-  * Empirical inter-DMA phase calibration (`calibrate_i2s_phase.py`) measured mean skew between Pair A (I2S0) and Pair B (I2S1) at $\Delta \tau = -24.69\ \mu\text{s}$ ($-1.09$ samples at 44.1 kHz, or $-0.27$ samples at 11.025 kHz), which is compensated via a 1-sample integer alignment shift.
+  * Initial bench phase calibration (`calibrate_i2s_phase.py`, recorded in `stage2_acoustic_localization/evidence/i2s_phase_calibration.json`) measured mean inter-pair skew between Pair A (I2S0) and Pair B (I2S1) at $\Delta \tau = +24.69\ \mu\text{s}$ (+1.089 samples at 44.1 kHz, with `is_sync_healthy: false`). Because synchronization was flagged unverified/skewed, runtime compensation is safely BYPASSED by default in the radar application. Physical open-air acoustic phase calibration at the production 10,000 Hz sample rate remains a planned laboratory milestone.
 * **Dynamic Vibration Gravity Decoupling:**
   * Static gravity is decoupled via running per-axis DC bias tracking ($\bar{g}_x, \bar{g}_y, \bar{g}_z$ with exponential moving average $\alpha=0.01$).
   * Dynamic vibration magnitude is computed as $a_{\text{dyn}} = \sqrt{(a_x - \bar{g}_x)^2 + (a_y - \bar{g}_y)^2 + (a_z - \bar{g}_z)^2}$, preventing cancellation of lateral vibration signatures.

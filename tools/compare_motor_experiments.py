@@ -238,8 +238,12 @@ def generate_comparison_plots(h_res, d_res, dist_res=None):
                     if len(seg) > 0:
                         ac_data[b] = float(np.sqrt(np.mean(seg**2)))
                 ac_label = f"Microphone Acoustic RMS Envelope (Recorded from {os.path.basename(wav_dist_path)})"
-            except Exception:
+            except Exception as e:
+                print(f"[!] Warning: Failed to decode disturbance WAV file '{wav_dist_path}': {e}", file=sys.stderr)
                 ac_data = np.zeros_like(v_d)
+                ac_label = f"Microphone Acoustic RMS Envelope (WAV Read Error: {e})"
+        else:
+            print(f"[!] Info: Physical disturbance WAV not found in {EXP_DIR} (checked {[os.path.basename(c) for c in wav_candidates]}). Awaiting physical test.", file=sys.stderr)
 
         ax_d1.plot(t_d, ac_data, color="#ffaa00", lw=1.5, label=ac_label)
         ax_d1.plot(t_d, v_d, color=c_healthy, lw=1.5, label="Chassis Dynamic Vibration $a_{dyn}$ (Nominal < 0.15g)")
