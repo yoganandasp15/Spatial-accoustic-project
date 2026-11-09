@@ -1991,9 +1991,9 @@ class AcousticRadarApp:
         self._setup_ui()
 
     def _get_evidence_mode_tag(self) -> str:
-        """Returns clear evidence mode tag distinguishing physical hardware from simulation."""
+        """Returns concise evidence mode tag that never overflows the top header."""
         if getattr(self, "demo_profile_idx", 0) > 0:
-            return f"DEMO INJECTION: {self.demo_profiles[self.demo_profile_idx]} (Key 'T' to revert to live)"
+            return f"DEMO MODE: {self.demo_profiles[self.demo_profile_idx]} (Press 'T' for Live)"
         if self.active_source_type == "ESP32":
             telemetry = self.current_source.get_multimodal_telemetry()
             is_alive = telemetry.get("is_hardware_alive", False)
@@ -2004,48 +2004,44 @@ class AcousticRadarApp:
 
             if is_alive and (time.time() - last_pkt < 1.5) and pkt_valid > 5:
                 if ch_active >= 4:
-                    return f"MODE: LIVE 4-MIC ULA HARDWARE (COM8, CHK VALIDATED) [{self.geometry.name}]"
+                    return "LIVE HARDWARE: COM8 @ 921.6k | 4-MIC ULA + ADXL345 + FC-03 (CHK OK)"
                 else:
-                    return f"MODE: LIVE HARDWARE (COM8, {ch_active}/4 CH ACTIVE, CHK OK) [{self.geometry.name}]"
+                    return f"LIVE HARDWARE: COM8 ({ch_active}/4 MICS ACTIVE | CHK OK)"
             elif is_alive and chk_err > 0:
-                return f"MODE: HARDWARE WARNING ({chk_err} CHECKSUM ERRORS) [{self.geometry.name}]"
+                return f"HARDWARE LINK WARNING ({chk_err} CHECKSUM ERRORS)"
             else:
-                return "MODE: ESP32 STANDBY / DISCONNECTED"
+                return "ESP32 STANDBY / DISCONNECTED (Press 'T' for Demo)"
         elif self.active_source_type == "SYNTHETIC":
-            return f"MODE: SYNTHETIC 4-CH ARRAY SIMULATION [{self.geometry.name}]"
+            return "SYNTHETIC 4-CH ARRAY & MOTOR SIMULATION"
         elif self.active_source_type == "LAPTOP":
-            return f"MODE: LAPTOP INTERNAL MIC DEMO [{self.geometry.name}]"
-        return f"MODE: {self.active_source_type}"
+            return "LAPTOP INTERNAL MICROPHONE ARRAY DEMO"
+        return f"SOURCE: {self.active_source_type}"
 
     def _setup_ui(self):
         plt.style.use("dark_background")
-        self.fig = plt.figure(figsize=(19, 10), facecolor="#0a0e17")
+        self.fig = plt.figure(figsize=(19.2, 10.2), facecolor="#070b12")
 
         try:
             if hasattr(self.fig.canvas, "manager") and self.fig.canvas.manager:
                 self.fig.canvas.manager.set_window_title(
-                    "Spatial Multimodal Acoustic Radar Pro | 4-Channel Industrial Suite (v6)"
+                    "Spatial Multimodal Edge-AI | Rotating Machinery Fault Detection & Localization (v6)"
                 )
         except Exception:
             pass
 
-        # 2 rows x 4 columns balanced layout
-        # Col 0: 2D Acoustic Camera (Spatial Localization)
-        # Col 1: Polar Bearing Radar (Top) + Live 4-Mic Waveforms (Bottom)
-        # Col 2: Multi-Pair SRP Spectrum (Top) + Live ADXL345 3-Axis Vibration Scope (Bottom)
-        # Col 3: Rotational Orders & Tachometer (Top) + Multimodal Motor Health HUD (Bottom)
+        # 2 rows x 4 columns balanced layout with generous margins to prevent clipping/overlap
         gs = gridspec.GridSpec(
             2, 4,
-            width_ratios=[1.10, 0.90, 0.92, 1.08],
+            width_ratios=[1.08, 0.92, 0.92, 1.08],
             height_ratios=[1.0, 1.0],
-            hspace=0.28, wspace=0.24,
-            left=0.030, right=0.985, top=0.93, bottom=0.04
+            hspace=0.35, wspace=0.29,
+            left=0.048, right=0.985, top=0.885, bottom=0.055
         )
 
         # ---------------------------------------------------------------------
-        # 1. 2D Spatial Heatmap / Acoustic Camera (Left Panel: gs[:, 0])
+        # 1. 2D Spatial Heatmap / Acoustic Camera (Col 0: gs[:, 0])
         # ---------------------------------------------------------------------
-        self.ax_map = self.fig.add_subplot(gs[:, 0], facecolor="#101726")
+        self.ax_map = self.fig.add_subplot(gs[:, 0], facecolor="#0d1422")
         self.im_heat = self.ax_map.imshow(
             self.smoothed_heatmap,
             origin="lower",
@@ -2056,56 +2052,62 @@ class AcousticRadarApp:
             interpolation="bicubic"
         )
 
-        self.cb = self.fig.colorbar(self.im_heat, ax=self.ax_map, fraction=0.046, pad=0.04)
-        self.cb.set_label("Relative acoustic level above ambient (not dB SPL)", color="#b8c2d1", fontsize=10)
-        self.cb.ax.tick_params(colors="#b8c2d1", labelsize=9)
+        # Horizontal colorbar at bottom of Col 0 -> ZERO collision with Col 1 labels!
+        self.cb = self.fig.colorbar(
+            self.im_heat, ax=self.ax_map, orientation="horizontal",
+            fraction=0.036, pad=0.09, aspect=28
+        )
+        self.cb.set_label("Relative Acoustic Intensity Above Ambient (not dB SPL)", color="#94a3b8", fontsize=8.5)
+        self.cb.ax.tick_params(colors="#94a3b8", labelsize=8)
 
-        # Dynamic Side Intensity Indicators (Left & Right Flank VU Rails)
+        # Dynamic Side Intensity Indicators (Shortened to y=[0.45, 2.50] so top is clutter-free)
         self.left_gauge_bg, = self.ax_map.plot(
-            [-1.88, -1.88], [0.45, 3.25],
-            color="#141f33", linewidth=11, solid_capstyle="round", zorder=7
+            [-1.84, -1.84], [0.45, 2.50],
+            color="#141f33", linewidth=10, solid_capstyle="round", zorder=7
         )
         self.left_gauge_fill, = self.ax_map.plot(
-            [-1.88, -1.88], [0.45, 0.45],
-            color="#00ffcc", linewidth=11, solid_capstyle="round", zorder=8
+            [-1.84, -1.84], [0.45, 0.45],
+            color="#00ffcc", linewidth=10, solid_capstyle="round", zorder=8
         )
         self.left_gauge_text = self.ax_map.text(
-            -1.88, 3.32, "◄ LEFT\n0%",
-            color="#00ffcc", fontsize=8.5, fontweight="bold", ha="center", va="bottom", zorder=9
+            -1.84, 2.60, "◄ L\n0%",
+            color="#00ffcc", fontsize=8.0, fontweight="bold", ha="center", va="bottom", zorder=9,
+            bbox=dict(boxstyle="round,pad=0.18", facecolor="#070b12", edgecolor="none", alpha=0.75)
         )
 
         self.right_gauge_bg, = self.ax_map.plot(
-            [1.88, 1.88], [0.45, 3.25],
-            color="#141f33", linewidth=11, solid_capstyle="round", zorder=7
+            [1.84, 1.84], [0.45, 2.50],
+            color="#141f33", linewidth=10, solid_capstyle="round", zorder=7
         )
         self.right_gauge_fill, = self.ax_map.plot(
-            [1.88, 1.88], [0.45, 0.45],
-            color="#00ffcc", linewidth=11, solid_capstyle="round", zorder=8
+            [1.84, 1.84], [0.45, 0.45],
+            color="#00ffcc", linewidth=10, solid_capstyle="round", zorder=8
         )
         self.right_gauge_text = self.ax_map.text(
-            1.88, 3.32, "RIGHT ►\n0%",
-            color="#00ffcc", fontsize=8.5, fontweight="bold", ha="center", va="bottom", zorder=9
+            1.84, 2.60, "R ►\n0%",
+            color="#00ffcc", fontsize=8.0, fontweight="bold", ha="center", va="bottom", zorder=9,
+            bbox=dict(boxstyle="round,pad=0.18", facecolor="#070b12", edgecolor="none", alpha=0.75)
         )
 
-        # Incoming Sound Sector HUD Banner
+        # Incoming Sound Sector HUD Pill Banner (Isolated cleanly at top of camera at y=3.32)
         self.sector_banner_text = self.ax_map.text(
-            0.0, 3.35, "• SCANNING ACOUSTIC FIELD •",
-            color="#8da2c0", fontsize=9.0, fontweight="bold", ha="center", va="bottom", zorder=9
+            0.0, 3.33, "SCANNING ACOUSTIC FIELD",
+            color="#8da2c0", fontsize=8.5, fontweight="bold", ha="center", va="center", zorder=10,
+            bbox=dict(boxstyle="round,pad=0.32", facecolor="#070b12", edgecolor="#2a3b5c", alpha=0.92, lw=1.2)
         )
 
         # Array Microphones Scatter with individual labels
         self.scatter_mics = self.ax_map.scatter(
             self.geometry.mic_coords[:, 0], self.geometry.mic_coords[:, 1],
-            marker="^", color="#00ffcc", s=130, edgecolor="#ffffff", linewidth=1.5,
-            label="4-Mic Array (INMP441)", zorder=5
+            marker="^", color="#00ffcc", s=110, edgecolor="#ffffff", linewidth=1.2,
+            label="4-Mic ULA (INMP441)", zorder=5
         )
 
-        # Microphone labels (M1, M2, M3, M4)
         self.mic_labels = []
         for i in range(self.geometry.num_mics):
             txt = self.ax_map.text(
                 self.geometry.mic_coords[i, 0], self.geometry.mic_coords[i, 1] - 0.12,
-                f"M{i+1}", color="#00ffcc", fontsize=9, fontweight="bold",
+                f"M{i+1}", color="#00ffcc", fontsize=8, fontweight="bold",
                 ha="center", va="top", zorder=6
             )
             self.mic_labels.append(txt)
@@ -2113,9 +2115,9 @@ class AcousticRadarApp:
         # Estimated Peak Target Crosshair
         self.marker_source, = self.ax_map.plot(
             [0], [1.25],
-            marker="o", markersize=16, markerfacecolor="none",
-            markeredgecolor="#00ffcc", markeredgewidth=3.0,
-            label="Locked Target", zorder=6
+            marker="o", markersize=15, markerfacecolor="none",
+            markeredgecolor="#00ffcc", markeredgewidth=2.8,
+            label="DOA Target Ray", zorder=6
         )
         self.target_line, = self.ax_map.plot(
             [0, 0], [0, 1.25],
@@ -2127,191 +2129,223 @@ class AcousticRadarApp:
             theta_arc = np.linspace(-np.pi / 2, np.pi / 2, 80)
             self.ax_map.plot(
                 r_m * np.sin(theta_arc), r_m * np.cos(theta_arc),
-                color="#24334d", linestyle="--", linewidth=1.0, zorder=2
+                color="#24334d", linestyle="--", linewidth=0.9, zorder=2
             )
             self.ax_map.text(
-                0.05, r_m + 0.05, f"{r_m:.0f}m",
-                color="#455b80", fontsize=9, family="monospace"
+                0.06, r_m + 0.04, f"{r_m:.0f}m",
+                color="#455b80", fontsize=8, family="monospace"
             )
 
         for ang_deg in [-60, -30, 0, 30, 60]:
             ang_rad = np.deg2rad(ang_deg)
             self.ax_map.plot(
                 [0, 3.4 * np.sin(ang_rad)], [0, 3.4 * np.cos(ang_rad)],
-                color="#1c283d", linestyle=":", linewidth=1.0, zorder=2
+                color="#1c283d", linestyle=":", linewidth=0.9, zorder=2
             )
 
         self.ax_map.set_xlim(X_MIN, X_MAX)
         self.ax_map.set_ylim(Y_MIN, Y_MAX)
-        self.ax_map.set_xlabel("Left / Right Offset (m)", color="#b8c2d1", fontsize=11)
-        self.ax_map.set_ylabel("Illustrative Backprojection Distance (m) [DOA Ray]", color="#b8c2d1", fontsize=10)
-        self.ax_map.set_title("2D ACOUSTIC CAMERA (DOA θ-FOCUS RADIAL BACKPROJECTION)", color="#ffffff", fontsize=11, pad=10, weight="bold")
-        self.ax_map.tick_params(colors="#b8c2d1")
-        self.ax_map.legend(loc="upper right", facecolor="#101726", edgecolor="#2a3b5c", fontsize=9)
+        self.ax_map.set_xlabel("Lateral Offset X (m)", color="#b8c2d1", fontsize=9.5)
+        self.ax_map.set_ylabel("Forward Standoff Range Y (m) [DOA Ray]", color="#b8c2d1", fontsize=9.5)
+        self.ax_map.set_title("1. 2D ACOUSTIC CAMERA (WHERE IS IT?)", color="#00ffcc", fontsize=10, pad=8, weight="bold")
+        self.ax_map.tick_params(colors="#b8c2d1", labelsize=8.5)
+        # Legend placed at lower center away from the top banner!
+        self.ax_map.legend(loc="lower center", ncol=2, facecolor="#070b12", edgecolor="#2a3b5c", fontsize=7.8, framealpha=0.90)
         self.ax_map.grid(alpha=0.15, color="#34496d")
 
         # ---------------------------------------------------------------------
         # 2. Polar Radar Sweep (Col 1 Top: gs[0, 1])
         # ---------------------------------------------------------------------
-        self.ax_radar = self.fig.add_subplot(gs[0, 1], projection="polar", facecolor="#101726")
+        self.ax_radar = self.fig.add_subplot(gs[0, 1], projection="polar", facecolor="#0d1422")
         self.radar_angles = np.deg2rad(np.linspace(-90, 90, 181))
         self.radar_line, = self.ax_radar.plot(self.radar_angles, np.zeros_like(self.radar_angles), color="#00ffcc", linewidth=2.0)
-        
-        self.meas_needle, = self.ax_radar.plot([0, 0], [0, 0.85], color="#ff7700", linewidth=2.0, linestyle="--", label="Instantaneous")
-        self.radar_needle, = self.ax_radar.plot([0, 0], [0, 1.0], color="#00ffcc", linewidth=3.5, label="Filtered Track")
-        
+
+        self.meas_needle, = self.ax_radar.plot([0, 0], [0, 0.85], color="#ff7700", linewidth=2.0, linestyle="--", label="Instant DOA")
+        self.radar_needle, = self.ax_radar.plot([0, 0], [0, 1.0], color="#00ffcc", linewidth=3.2, label="Kalman Track")
+
         self.ax_radar.set_theta_zero_location("N")
         self.ax_radar.set_theta_direction(-1)
         self.ax_radar.set_thetamin(-90)
         self.ax_radar.set_thetamax(90)
-        self.ax_radar.set_title("POLAR BEARING RADAR (180°)", color="#ffffff", fontsize=11, weight="bold", pad=12)
+        self.ax_radar.set_title("2. POLAR BEARING RADAR (180°)", color="#ffffff", fontsize=10, weight="bold", pad=10)
         self.ax_radar.tick_params(colors="#b8c2d1", labelsize=8)
         self.ax_radar.grid(color="#24334d", alpha=0.5)
-        self.ax_radar.legend(loc="lower right", facecolor="#101726", edgecolor="#2a3b5c", fontsize=7)
+        self.ax_radar.legend(loc="lower right", facecolor="#070b12", edgecolor="#2a3b5c", fontsize=7.2)
 
         # ---------------------------------------------------------------------
         # 3. ALL 4 MICROPHONE LIVE INPUTS (Col 1 Bottom: gs[1, 1])
         # ---------------------------------------------------------------------
-        self.ax_mics = self.fig.add_subplot(gs[1, 1], facecolor="#0e1420")
-        self.mic_colors = ["#00ffcc", "#ffaa00", "#ff0077", "#33ccff"] # M1, M2, M3, M4
+        self.ax_mics = self.fig.add_subplot(gs[1, 1], facecolor="#0b111d")
+        self.mic_colors = ["#00ffcc", "#ffaa00", "#ff0077", "#33ccff"]
         self.mic_names = [
-            "M1: Pair A Left  (GPIO 19, Row 20)",
-            "M2: Pair A Right (GPIO 19, Row 28)",
-            "M3: Pair B Left  (GPIO 23, Row 36)",
-            "M4: Pair B Right (GPIO 23, Row 44)"
+            "M1: Pair A Left  (GPIO 19)",
+            "M2: Pair A Right (GPIO 19)",
+            "M3: Pair B Left  (GPIO 23)",
+            "M4: Pair B Right (GPIO 23)"
         ]
 
-        # 4 Stacked oscilloscope lines
         self.wave_lines = []
         for i in range(4):
-            line, = self.ax_mics.plot([], [], color=self.mic_colors[i], linewidth=1.2, label=f"Mic {i+1}")
+            line, = self.ax_mics.plot([], [], color=self.mic_colors[i], linewidth=1.15, label=f"Mic {i+1}")
             self.wave_lines.append(line)
 
         self.ax_mics.set_xlim(0, 512)
-        self.ax_mics.set_ylim(-4.2, 4.2)
-        self.ax_mics.set_title("LIVE 4-CHANNEL MICROPHONE ARRAY INPUTS", color="#ffffff", fontsize=11, weight="bold")
-        self.ax_mics.set_xlabel("Audio Frame Samples (DMA Block)", color="#b8c2d1", fontsize=9)
-        self.ax_mics.set_ylabel("Stacked Channels [M1..M4]", color="#b8c2d1", fontsize=9)
+        self.ax_mics.set_ylim(-4.3, 4.3)
+        self.ax_mics.set_title("3. 4-MIC INMP441 ARRAY WAVEFORMS", color="#ffffff", fontsize=10, weight="bold", pad=8)
+        self.ax_mics.set_xlabel("Audio Frame Samples (DMA Block)", color="#b8c2d1", fontsize=8.5)
+        self.ax_mics.set_ylabel("Channels [M1..M4]", color="#b8c2d1", fontsize=8.5)
         self.ax_mics.set_yticks([-3.0, -1.0, 1.0, 3.0])
         self.ax_mics.set_yticklabels(["M4 (B-R)", "M3 (B-L)", "M2 (A-R)", "M1 (A-L)"], fontsize=8, color="#b8c2d1")
+        self.ax_mics.tick_params(colors="#b8c2d1", labelsize=8)
         self.ax_mics.grid(alpha=0.15, color="#34496d")
 
-        # Live VU / RMS badge texts beside each channel
         self.vu_texts = []
         for i in range(4):
             y_pos = 3.0 - i * 2.0
             txt = self.ax_mics.text(
-                505, y_pos + 0.35, "RMS: 0000 | PK: 0000",
-                color=self.mic_colors[i], fontsize=8, family="monospace", ha="right", va="bottom",
-                bbox=dict(boxstyle="round,pad=0.2", facecolor="#101726", edgecolor=self.mic_colors[i], alpha=0.8)
+                504, y_pos + 0.36, "RMS: 0.0000",
+                color=self.mic_colors[i], fontsize=7.3, family="monospace", ha="right", va="bottom",
+                bbox=dict(boxstyle="round,pad=0.18", facecolor="#070b12", edgecolor=self.mic_colors[i], alpha=0.88)
             )
             self.vu_texts.append(txt)
 
         # ---------------------------------------------------------------------
         # 4. SRP-PHAT Delay Profile & Angular Spectrum (Col 2 Top: gs[0, 2])
         # ---------------------------------------------------------------------
-        self.ax_srp = self.fig.add_subplot(gs[0, 2], facecolor="#101726")
+        self.ax_srp = self.fig.add_subplot(gs[0, 2], facecolor="#0d1422")
         self.srp_line, = self.ax_srp.plot([], [], color="#00ffcc", linewidth=2.0, label="SRP-PHAT (6 Pairs)")
         self.srp_peak_marker, = self.ax_srp.plot([], [], color="#ff0055", marker="o", markersize=8, label="Estimated DOA")
         self.ax_srp.set_xlim(-90, 90)
         self.ax_srp.set_ylim(-0.05, 1.15)
-        self.ax_srp.set_title("MULTI-PAIR STEERED RESPONSE POWER", color="#ffffff", fontsize=11, weight="bold")
-        self.ax_srp.set_xlabel("Bearing Angle (deg)", color="#b8c2d1", fontsize=9)
-        self.ax_srp.set_ylabel("Normalized SRP Power", color="#b8c2d1", fontsize=9)
+        self.ax_srp.set_title("4. MULTI-PAIR SRP-PHAT (6 PAIRS)", color="#ffffff", fontsize=10, weight="bold", pad=8)
+        self.ax_srp.set_xlabel("Bearing Angle θ (deg)", color="#b8c2d1", fontsize=8.5)
+        self.ax_srp.set_ylabel("Normalized SRP Power", color="#b8c2d1", fontsize=8.5)
         self.ax_srp.tick_params(colors="#b8c2d1", labelsize=8)
         self.ax_srp.grid(alpha=0.15, color="#34496d")
-        self.ax_srp.legend(loc="upper right", facecolor="#101726", edgecolor="#2a3b5c", fontsize=7)
+        self.ax_srp.legend(loc="upper right", facecolor="#070b12", edgecolor="#2a3b5c", fontsize=7.2)
 
         # ---------------------------------------------------------------------
         # 5. LIVE ADXL345 3-AXIS VIBRATION SCOPE (Col 2 Bottom: gs[1, 2])
         # ---------------------------------------------------------------------
-        self.ax_vib = self.fig.add_subplot(gs[1, 2], facecolor="#0e1420")
-        self.vib_line_x, = self.ax_vib.plot([], [], color="#ff9226", linewidth=1.1, label="a_x (X-Axis)")
-        self.vib_line_y, = self.ax_vib.plot([], [], color="#38bdf8", linewidth=1.1, label="a_y (Y-Axis)")
-        self.vib_line_z, = self.ax_vib.plot([], [], color="#e879f9", linewidth=1.1, label="a_z (Z-Axis)")
-        self.vib_line_dyn, = self.ax_vib.plot([], [], color="#00ffcc", linewidth=2.0, label="a_dyn (Dynamic RMS)")
+        self.ax_vib = self.fig.add_subplot(gs[1, 2], facecolor="#0b111d")
+        self.vib_line_x, = self.ax_vib.plot([], [], color="#ff9226", linewidth=1.05, label="a_x (X)")
+        self.vib_line_y, = self.ax_vib.plot([], [], color="#38bdf8", linewidth=1.05, label="a_y (Y)")
+        self.vib_line_z, = self.ax_vib.plot([], [], color="#e879f9", linewidth=1.05, label="a_z (Z)")
+        self.vib_line_dyn, = self.ax_vib.plot([], [], color="#00ffcc", linewidth=1.9, label="a_dyn (RMS)")
 
-        # ISO 10816 Dynamic Severity Zones (Guidelines)
         self.ax_vib.axhline(0.15, color="#00ffcc", linestyle="--", alpha=0.45, linewidth=0.9)
         self.ax_vib.axhline(0.35, color="#38bdf8", linestyle="--", alpha=0.45, linewidth=0.9)
         self.ax_vib.axhline(0.70, color="#f59e0b", linestyle="--", alpha=0.45, linewidth=0.9)
 
-        self.ax_vib.text(250, 0.16, "Zone A: Good (0.15g)", color="#00ffcc", fontsize=7.5, va="bottom", ha="right", alpha=0.85)
-        self.ax_vib.text(250, 0.36, "Zone B: Perm (0.35g)", color="#38bdf8", fontsize=7.5, va="bottom", ha="right", alpha=0.85)
-        self.ax_vib.text(250, 0.71, "Zone C: Warn (0.70g)", color="#f59e0b", fontsize=7.5, va="bottom", ha="right", alpha=0.85)
+        self.ax_vib.text(0.98, 0.56, "Zone A (<0.15g)", transform=self.ax_vib.transAxes, color="#00ffcc", fontsize=7.0, ha="right", alpha=0.85)
+        self.ax_vib.text(0.98, 0.64, "Zone B (<0.35g)", transform=self.ax_vib.transAxes, color="#38bdf8", fontsize=7.0, ha="right", alpha=0.85)
+        self.ax_vib.text(0.98, 0.78, "Zone C (0.70g)", transform=self.ax_vib.transAxes, color="#f59e0b", fontsize=7.0, ha="right", alpha=0.85)
 
         self.ax_vib.set_xlim(0, 256)
         self.ax_vib.set_ylim(-1.25, 1.25)
-        self.ax_vib.set_title("LIVE ADXL345 3-AXIS VIBRATION SCOPE (400 Hz)", color="#ffffff", fontsize=11, weight="bold")
-        self.ax_vib.set_xlabel("Vibration FIFO Samples (400 Hz ODR)", color="#b8c2d1", fontsize=9)
-        self.ax_vib.set_ylabel("Acceleration (g)", color="#b8c2d1", fontsize=9)
+        self.ax_vib.set_title("5. ADXL345 3-AXIS VIBRATION (400 Hz)", color="#ffffff", fontsize=10, weight="bold", pad=8)
+        self.ax_vib.set_xlabel("Vibration FIFO Samples (400 Hz ODR)", color="#b8c2d1", fontsize=8.5)
+        self.ax_vib.set_ylabel("Acceleration (g)", color="#b8c2d1", fontsize=8.5)
         self.ax_vib.tick_params(colors="#b8c2d1", labelsize=8)
         self.ax_vib.grid(alpha=0.15, color="#34496d")
-        self.ax_vib.legend(loc="upper left", facecolor="#101726", edgecolor="#2a3b5c", fontsize=7, ncol=2)
+        self.ax_vib.legend(loc="upper left", facecolor="#070b12", edgecolor="#2a3b5c", fontsize=7.0, ncol=2)
 
         self.vib_badge_text = self.ax_vib.text(
-            0.98, 0.05, "a_dyn: 0.000g | ISO Vel: 0.00 mm/s",
+            0.98, 0.04, "a_dyn: 0.000g | ISO Vel: 0.00 mm/s",
             transform=self.ax_vib.transAxes,
-            color="#00ffcc", fontsize=8.0, family="monospace", ha="right", va="bottom",
-            bbox=dict(boxstyle="round,pad=0.25", facecolor="#101726", edgecolor="#00ffcc", alpha=0.85)
+            color="#00ffcc", fontsize=7.5, family="monospace", ha="right", va="bottom",
+            bbox=dict(boxstyle="round,pad=0.22", facecolor="#070b12", edgecolor="#00ffcc", alpha=0.90)
         )
 
         # ---------------------------------------------------------------------
         # 6. ROTATIONAL ORDER SPECTRUM & TACHOMETER (Col 3 Top: gs[0, 3])
         # ---------------------------------------------------------------------
-        self.ax_order = self.fig.add_subplot(gs[0, 3], facecolor="#0e1420")
+        self.ax_order = self.fig.add_subplot(gs[0, 3], facecolor="#0b111d")
 
-        # Digital Speedometer Readout
+        # Digital Speedometer Readout (Sized to fit strictly inside Col 3)
         self.speedometer_text = self.ax_order.text(
-            0.50, 0.88, "SPEED: 0.0 RPM (f0 = 0.0 Hz)",
+            0.50, 0.90, "SPEED: 0 RPM (f0 = 0.0 Hz)",
             transform=self.ax_order.transAxes,
-            ha="center", va="center", color="#00ffcc", fontsize=11, fontweight="bold", family="monospace",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="#141f33", edgecolor="#00ffcc", linewidth=1.5)
+            ha="center", va="center", color="#00ffcc", fontsize=9.2, fontweight="bold", family="monospace",
+            bbox=dict(boxstyle="round,pad=0.28", facecolor="#101b2d", edgecolor="#00ffcc", linewidth=1.3)
         )
 
         # FC-03 Pulse Blinker LED
         self.tach_indicator_text = self.ax_order.text(
-            0.50, 0.72, "○ FC-03 TACH: READY (0 Pulses)",
+            0.50, 0.76, "○ FC-03 TACH: READY (0 Pulses)",
             transform=self.ax_order.transAxes,
-            ha="center", va="center", color="#8da2c0", fontsize=8.5, fontweight="bold", family="monospace"
+            ha="center", va="center", color="#8da2c0", fontsize=8.0, fontweight="bold", family="monospace"
         )
 
-        # Rotational Harmonic Order Bar Chart (1X, 2X, 3X)
         bar_x = [0, 1, 2]
         self.order_bars = self.ax_order.bar(
             bar_x, [0.0, 0.0, 0.0],
-            width=0.55,
+            width=0.52,
             color=["#00ffcc", "#38bdf8", "#e879f9"],
             edgecolor="#ffffff", linewidth=1.0, zorder=3
         )
         self.ax_order.set_xticks(bar_x)
-        self.ax_order.set_xticklabels(["1X (Unbal)", "2X (Misalign)", "3X (Harmonic)"], fontsize=8.5, color="#b8c2d1", fontweight="bold")
-        self.ax_order.set_ylim(0, 100)
-        self.ax_order.set_ylabel("Rotational Energy (%)", color="#b8c2d1", fontsize=9)
-        self.ax_order.set_title("ROTATIONAL ORDER SPECTRUM & TACHOMETER", color="#ffffff", fontsize=11, weight="bold")
+        self.ax_order.set_xticklabels(["1X (Unbalance)", "2X (Misalign)", "3X (Harmonic)"], fontsize=8.2, color="#b8c2d1", fontweight="bold")
+        self.ax_order.set_ylim(0, 118)
+        self.ax_order.set_ylabel("Rotational Energy (%)", color="#b8c2d1", fontsize=8.5)
+        self.ax_order.set_title("6. SHAFT RPM & ROTATIONAL ORDERS", color="#ffffff", fontsize=10, weight="bold", pad=8)
         self.ax_order.tick_params(colors="#b8c2d1", labelsize=8)
         self.ax_order.grid(alpha=0.15, color="#34496d", axis="y")
 
         self.bar_labels = [
-            self.ax_order.text(i, 3.0, "0.0%", ha="center", va="bottom", fontsize=8.5, fontweight="bold", color="#ffffff")
+            self.ax_order.text(i, 3.0, "0.0%", ha="center", va="bottom", fontsize=8.2, fontweight="bold", color="#ffffff")
             for i in range(3)
         ]
 
         # ---------------------------------------------------------------------
-        # 7. MULTIMODAL MOTOR HEALTH & DIAGNOSTIC HUD (Col 3 Bottom: gs[1, 3])
+        # 7. MULTIMODAL EDGE-AI FUSION & MINOR PROJECT VISION HUD (Col 3 Bottom: gs[1, 3])
         # ---------------------------------------------------------------------
-        self.ax_telemetry = self.fig.add_subplot(gs[1, 3], facecolor="#0e1420")
-        self.ax_telemetry.axis("off")
-        self.hud_text = self.ax_telemetry.text(
-            0.02, 0.98, "Acquiring Multimodal Telemetry...",
-            va="top", ha="left", color="#e0e6ed", fontsize=7.3, family="monospace", linespacing=1.05
+        self.ax_telemetry = self.fig.add_subplot(gs[1, 3], facecolor="#0b111d")
+        self.ax_telemetry.set_title("7. MULTIMODAL FUSION (WHAT & WHERE)", color="#00ffcc", fontsize=10, weight="bold", pad=8)
+        self.ax_telemetry.set_xticks([])
+        self.ax_telemetry.set_yticks([])
+        for spine in self.ax_telemetry.spines.values():
+            spine.set_edgecolor("#1e293b")
+            spine.set_linewidth(1.2)
+
+        # Card 1: WHAT IS WRONG? (Mechanical Condition)
+        self.what_box_text = self.ax_telemetry.text(
+            0.50, 0.91,
+            "WHAT IS WRONG? (MECHANICAL STATE)\nINITIALIZING...",
+            transform=self.ax_telemetry.transAxes,
+            ha="center", va="center", color="#00ffcc", fontsize=8.0, fontweight="bold", family="monospace",
+            bbox=dict(boxstyle="round,pad=0.30", facecolor="#101b2d", edgecolor="#00ffcc", linewidth=1.3)
         )
 
-        # Main Title Banner
+        # Card 2: WHERE IS IT? (Spatial Localization & Fusion)
+        self.where_box_text = self.ax_telemetry.text(
+            0.50, 0.73,
+            "WHERE IS THE SOUND? (SPATIAL DOA)\nSCANNING...",
+            transform=self.ax_telemetry.transAxes,
+            ha="center", va="center", color="#38bdf8", fontsize=8.0, fontweight="bold", family="monospace",
+            bbox=dict(boxstyle="round,pad=0.28", facecolor="#101b2d", edgecolor="#38bdf8", linewidth=1.2)
+        )
+
+        # Structured Telemetry & Hotkey Block (Strictly width-bounded <46 chars so zero clipping!)
+        self.hud_text = self.ax_telemetry.text(
+            0.03, 0.60, "Acquiring Multimodal Telemetry...",
+            transform=self.ax_telemetry.transAxes,
+            va="top", ha="left", color="#e2e8f0", fontsize=7.3, family="monospace", linespacing=1.18
+        )
+
+        # ---------------------------------------------------------------------
+        # Top 2-Tier Minor Project Vision Header
+        # ---------------------------------------------------------------------
+        self.fig.text(
+            0.50, 0.972,
+            "SPATIAL MULTIMODAL EDGE-AI FOR FAULT DETECTION & LOCALIZATION OF ROTATING MACHINERY",
+            ha="center", va="center", color="#00ffcc", fontsize=12.0, weight="bold"
+        )
         self.title_text = self.fig.text(
-            0.04, 0.968,
-            f"SPATIAL MULTIMODAL ACOUSTIC RADAR | [{self._get_evidence_mode_tag()}]",
-            color="#00ffcc", fontsize=11.5, weight="bold"
+            0.50, 0.938,
+            f"MINOR PROJECT VISION: [VIBRATION + 4-MIC ARRAY + RPM]  ►  ANSWERS 'WHAT IS WRONG?' & 'WHERE IS IT?'  |  [{self._get_evidence_mode_tag()}]",
+            ha="center", va="center", color="#f8fafc", fontsize=8.8, weight="bold", family="monospace",
+            bbox=dict(boxstyle="round,pad=0.28", facecolor="#101b2d", edgecolor="#2a3b5c", linewidth=1.2)
         )
 
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
@@ -2415,7 +2449,8 @@ class AcousticRadarApp:
             self.sector_banner_text,
             self.vib_line_x, self.vib_line_y, self.vib_line_z, self.vib_line_dyn,
             self.vib_badge_text,
-            self.speedometer_text, self.tach_indicator_text
+            self.speedometer_text, self.tach_indicator_text,
+            self.what_box_text, self.where_box_text, self.title_text
         ] + list(self.order_bars) + self.bar_labels + self.wave_lines + self.vu_texts
 
         if self.paused:
@@ -2466,7 +2501,7 @@ class AcousticRadarApp:
                     dbfs_calib = 20.0 * math.log10(max(r_calib, 1e-5))
                     status_str = "ACTIVE" if (r_val > 0.0018 or r_calib > 0.0030) else "QUIET "
                     # Display calibrated RMS while retaining raw RMS for diagnostic inspection
-                    self.vu_texts[i].set_text(f"M{i+1}: RMS={r_calib:.4f} ({dbfs_calib:+.1f}dB | raw:{r_val:.4f}) | {status_str}")
+                    self.vu_texts[i].set_text(f"M{i+1}: {r_calib:.4f} ({dbfs_calib:+.1f}dB) | {status_str}")
                 else:
                     self.wave_lines[i].set_data([], [])
                     self.vu_texts[i].set_text(f"M{i+1}: [DISABLED]")
@@ -2570,41 +2605,41 @@ class AcousticRadarApp:
                 intensity_r = 0.02
                 intensity_c = 0.02
 
-            y_bot, y_top = 0.45, 3.25
+            y_bot, y_top = 0.45, 2.50
             y_span = y_top - y_bot
 
             # Left VU rail
             h_left = y_bot + y_span * intensity_l
-            self.left_gauge_fill.set_data([-1.88, -1.88], [y_bot, h_left])
+            self.left_gauge_fill.set_data([-1.84, -1.84], [y_bot, h_left])
             c_left = "#ff0055" if (pct_l >= 48.0 and is_source_valid) else ("#ffaa00" if (pct_l >= 36.0 and is_source_valid) else "#00ffcc")
             self.left_gauge_fill.set_color(c_left)
             self.left_gauge_text.set_color(c_left)
-            self.left_gauge_text.set_text(f"◄ LEFT\n{pct_l:.0f}%" if is_source_valid else "◄ LEFT\nIDLE")
+            self.left_gauge_text.set_text(f"◄ L\n{pct_l:.0f}%" if is_source_valid else "◄ L\nIDLE")
 
             # Right VU rail
             h_right = y_bot + y_span * intensity_r
-            self.right_gauge_fill.set_data([1.88, 1.88], [y_bot, h_right])
+            self.right_gauge_fill.set_data([1.84, 1.84], [y_bot, h_right])
             c_right = "#ff0055" if (pct_r >= 48.0 and is_source_valid) else ("#ffaa00" if (pct_r >= 36.0 and is_source_valid) else "#00ffcc")
             self.right_gauge_fill.set_color(c_right)
             self.right_gauge_text.set_color(c_right)
-            self.right_gauge_text.set_text(f"RIGHT ►\n{pct_r:.0f}%" if is_source_valid else "RIGHT ►\nIDLE")
+            self.right_gauge_text.set_text(f"R ►\n{pct_r:.0f}%" if is_source_valid else "R ►\nIDLE")
 
             # Incoming Sector HUD Banner
             if not is_source_valid and is_active_sound:
-                reject_reason = str(side_metrics.get("status", "SPATIAL GATE"))
-                self.sector_banner_text.set_text(f"■ SOUND PRESENT — BEARING UNRESOLVED ({reject_reason}) ■")
+                reject_reason = str(side_metrics.get("status", "GATE"))
+                self.sector_banner_text.set_text(f"SOUND DETECTED — UNRESOLVED ({reject_reason})")
                 self.sector_banner_text.set_color("#ffaa00")
             elif not is_source_valid:
-                self.sector_banner_text.set_text("■ AMBIENT MONITORING — READY FOR TARGET SOUND ■")
-                self.sector_banner_text.set_color("#6b7d99")
+                self.sector_banner_text.set_text("AMBIENT MONITORING — READY FOR SOUND")
+                self.sector_banner_text.set_color("#8da2c0")
             elif dom_s == "LEFT":
-                self.sector_banner_text.set_text(f"◄◄ INCOMING SOUND: LEFT FLANK ({target_angle:+.1f}°) | {pct_l:.0f}% INTENSITY")
+                self.sector_banner_text.set_text(f"◄◄ LEFT FLANK ({target_angle:+.1f}° | {pct_l:.0f}% POWER)")
                 self.sector_banner_text.set_color("#ff0055" if pct_l >= 48.0 else "#ffaa00")
             elif dom_s == "RIGHT":
-                self.sector_banner_text.set_text(f"INCOMING SOUND: RIGHT FLANK ({target_angle:+.1f}°) | {pct_r:.0f}% INTENSITY ►►")
+                self.sector_banner_text.set_text(f"RIGHT FLANK ({target_angle:+.1f}° | {pct_r:.0f}% POWER) ►►")
                 self.sector_banner_text.set_color("#ff0055" if pct_r >= 48.0 else "#ffaa00")
             else:
-                self.sector_banner_text.set_text(f"▲ INCOMING SOUND: FRONT CENTER ({target_angle:+.1f}°) | {pct_c:.0f}% INTENSITY ▲")
+                self.sector_banner_text.set_text(f"▲ FRONT CENTER ({target_angle:+.1f}° | {pct_c:.0f}% POWER) ▲")
                 self.sector_banner_text.set_color("#00ffcc")
 
             # 5. Polar Radar Sweep
@@ -2758,10 +2793,10 @@ class AcousticRadarApp:
                 self.tach_indicator_text.set_color("#64748b")
 
             if is_running:
-                self.speedometer_text.set_text(f"● MOTOR RUNNING: {rpm:5.0f} RPM (f0 = {motor_diag['f0_hz']:.1f} Hz)")
+                self.speedometer_text.set_text(f"● RUNNING: {rpm:4.0f} RPM (f0 = {motor_diag['f0_hz']:.1f} Hz)")
                 self.speedometer_text.set_color("#00ffcc")
             else:
-                self.speedometer_text.set_text("○ MOTOR STOPPED / IDLE (0 RPM)")
+                self.speedometer_text.set_text("○ MOTOR STOPPED / STANDBY (0 RPM)")
                 self.speedometer_text.set_color("#94a3b8")
 
             e1 = float(motor_diag.get("e_1x_pct", 0.0))
@@ -2772,7 +2807,7 @@ class AcousticRadarApp:
             self.order_bars[1].set_height(e2)
             self.order_bars[2].set_height(e3)
 
-            c1 = "#ef4444" if e1 > 15.0 else ("#f59e0b" if e1 > 8.0 else "#00ffcc")
+            c1 = "#ef4444" if (e1 > 18.0 and dyn_vib_g >= 0.14) else ("#f59e0b" if (e1 > 10.0 and dyn_vib_g >= 0.10) else "#00ffcc")
             c2 = "#e879f9" if e2 > 12.0 else ("#a855f7" if e2 > 6.0 else "#38bdf8")
             c3 = "#f43f5e" if e3 > 10.0 else "#64748b"
 
@@ -2834,38 +2869,73 @@ class AcousticRadarApp:
                 base_str = "UNLOCKED [Press 'B' to Learn]"
 
             mode_tag = self._get_evidence_mode_tag()
-            self.title_text.set_text(f"SPATIAL MULTIMODAL ACOUSTIC RADAR | [{mode_tag}]")
+            self.title_text.set_text(
+                f"MINOR PROJECT VISION: [VIBRATION + 4-MIC ARRAY + RPM]  ►  ANSWERS 'WHAT IS WRONG?' & 'WHERE IS IT?'  |  [{mode_tag}]"
+            )
 
-            f0_str = f"f0={motor_diag['f0_hz']:.1f}Hz" if is_running else "IDLE"
+            f0_str = f"{motor_diag['f0_hz']:.1f}Hz" if is_running else "IDLE"
             if self.demo_profile_idx > 0:
                 adxl_short = "DEMO (400Hz SIM)"
             else:
-                adxl_short = "ONLINE (FIFO)" if telemetry.get("adxl_hw_ok", False) else "OFFLINE/CHECK I2C"
+                adxl_short = "ONLINE (FIFO)" if telemetry.get("adxl_hw_ok", False) else "CHECK I2C"
             iso_short = motor_diag["iso_severity"].split(":")[0]
-            calib_short = "ACTIVE" if self.apply_calibration else "BYPASS"
+            calib_short = "ON" if self.apply_calibration else "RAW"
             vad_short = "ACTIVE" if is_active_sound else "QUIET"
 
+            # Update Card 1: WHAT IS WRONG?
+            fault_str = str(motor_diag["primary_fault"])
+            if "DISTURBANCE" in fault_str:
+                what_title = "ACOUSTIC DISTURBANCE (NON-MECHANICAL)"
+                what_sub = f"Vib Nominal ({dyn_vib_g:.3f}g {iso_short}) -> Motor OK!"
+                what_col = "#ffaa00"
+            elif not is_running:
+                what_title = "MOTOR STOPPED / STANDBY"
+                what_sub = f"Vib: {dyn_vib_g:.3f}g | Awaiting Shaft Rotation"
+                what_col = "#94a3b8"
+            elif "NOMINAL" in fault_str:
+                what_title = "NOMINAL / HEALTHY MOTOR"
+                what_sub = f"Health: {h_score_str} | Vib: {dyn_vib_g:.3f}g ({iso_short})"
+                what_col = "#00ffcc"
+            else:
+                what_title = fault_str[:36]
+                what_sub = f"Health: {h_score_str} ({h_status}) | {iso_short}"
+                what_col = "#ff0055"
+
+            if hasattr(self, "what_box_text"):
+                self.what_box_text.set_text(f"WHAT IS WRONG?  ►  {what_title}\n{what_sub}")
+                self.what_box_text.set_color(what_col)
+                self.what_box_text.get_bbox_patch().set_edgecolor(what_col)
+
+            # Update Card 2: WHERE IS THE SOUND?
+            if is_source_valid:
+                where_title = f"DOA: {target_angle:+5.1f}° [{dir_str} FLANK]"
+                where_sub = f"Left:{pct_l:3.0f}% | Center:{pct_c:3.0f}% | Right:{pct_r:3.0f}%"
+                where_col = "#00ffcc" if is_locked else "#ffaa00"
+            elif is_active_sound:
+                where_title = "SOUND PRESENT (DIFFUSE / UNRESOLVED)"
+                where_sub = f"Gate: {side_metrics.get('status', 'SPATIAL GATE')[:28]}"
+                where_col = "#ffaa00"
+            else:
+                where_title = "QUIET AMBIENT FIELD (NO TARGET)"
+                where_sub = f"Noise Floor: {self.noise_floor:.4f} | 6-Pair SRP Idle"
+                where_col = "#64748b"
+
+            if hasattr(self, "where_box_text"):
+                self.where_box_text.set_text(f"WHERE IS IT?  ►  {where_title}\n{where_sub}")
+                self.where_box_text.set_color(where_col)
+                self.where_box_text.get_bbox_patch().set_edgecolor(where_col)
+
             hud_lines = [
-                "======================================================",
-                f" [EVIDENCE MODE]  {mode_tag[:36]}",
-                f" [MOTOR HEALTH]   [{h_bar}] {h_score_str} | {h_status}",
-                f" [DIAGNOSIS]      {motor_diag['primary_fault'][:38]}",
-                f" [BASELINE]       {base_str[:36]}",
-                "------------------------------------------------------",
-                f" [S1: TACHOMETER] Speed: {rpm:5.0f} RPM ({f0_str})",
-                f"                  Pulses: {pulses} (PPR={self.pulses_per_rev}, Key 'P')",
-                f" [S2: ADXL345]    {adxl_short} ({num_v_smp} smp)",
-                f"                  a_dyn:{dyn_vib_g:.3f}g | ISO:{motor_diag.get('v_rms_mms', 0.0):.2f}mm/s ({iso_short})",
-                f" [S3: ACOUSTIC]   Kurtosis: {motor_diag['kurtosis']:4.2f} | Crest: {motor_diag['crest_factor']:4.1f}",
-                f" [S4: HARMONICS]  1X={e1:4.1f}% | 2X={e2:4.1f}% | 3X={e3:4.1f}%",
-                "------------------------------------------------------",
-                f" [DOA TARGET]     {target_angle:+5.1f}° [{dir_str}] ({dom_tag[:14]})",
-                f"   FLANKS         L:{pct_l:4.1f}% | C:{pct_c:4.1f}% | R:{pct_r:4.1f}%",
-                f" [HARDWARE BUS]   COM8 @ 921.6k | Valid:{telemetry.get('packets_valid', 0)} Drop:{telemetry.get('dropped_packets', 0)}",
-                f" [CALIB & VAD]    Phase:{calib_short} | VAD:{vad_short} | Flr:{self.noise_floor:.4f}",
-                "======================================================",
-                " HOTKEYS: 'B' Baseline | 'C' Clear | 'P' PPR | 'T' Demo",
-                "          '1' Laptop   | '2' ESP32 | 'K' Cal | 'I' Invert"
+                f" [HEALTH]   [{h_bar}] {h_score_str} ({h_status})",
+                f" [BASELINE] {base_str[:34]}",
+                f" [S1: TACH] {rpm:5.0f} RPM ({f0_str}) | Pulses:{pulses} (PPR:{self.pulses_per_rev})",
+                f" [S2: VIB]  {adxl_short} | a_dyn:{dyn_vib_g:.3f}g | {motor_diag.get('v_rms_mms', 0.0):.2f}mm/s",
+                f" [S3: ACOU] Kurtosis:{motor_diag['kurtosis']:5.2f} | Crest:{motor_diag['crest_factor']:4.1f} | VAD:{vad_short}",
+                f" [S4: ORDR] 1X:{e1:4.1f}% | 2X:{e2:4.1f}% | 3X:{e3:4.1f}%",
+                f" [SERIAL]   COM8 @ 921.6k | OK:{telemetry.get('packets_valid', 0)} Drop:{telemetry.get('dropped_packets', 0)} Cal:{calib_short}",
+                " --------------------------------------------",
+                " KEYS: [B] Lock Base [C] Clear [P] PPR [T] Demo",
+                "       [1] Laptop [2] ESP32 [K] Cal [I] Flip"
             ]
             self.hud_text.set_text("\n".join(hud_lines))
 
