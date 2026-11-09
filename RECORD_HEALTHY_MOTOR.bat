@@ -5,10 +5,10 @@ color 0B
 cls
 echo ================================================================================
 echo          SPATIAL MULTIMODAL MOTOR RECORDER: HEALTHY MOTOR RUN (30s)
-echo          400Hz ADXL345 Vibration + FC-03 Tachometer + 4-Mic INMP441 Audio
+echo          400Hz ADXL345 Vibration (+/-2g) + FC-03 Tachometer + 4-Mic Audio
 echo ================================================================================
 echo.
-echo [INSTRUCTION] Ensure healthy DC motor is securely mounted, powered, and spinning.
+echo [INSTRUCTION] Ensure healthy DC motor (motor_A) is securely mounted and running.
 echo               Close any open radar GUI (COM8 will be used exclusively).
 echo               Duration: 30.0s (Captures ~12,000 vibration and ~300,000 audio samples).
 echo.

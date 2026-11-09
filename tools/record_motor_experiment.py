@@ -6,16 +6,24 @@
 Module: tools/record_motor_experiment.py
 Description: Connects to ESP32 on COM8 at 921,600 baud using the validated
              Type 0x05 binary protocol to record synchronized:
-               1. 400 Hz 3-Axis ADXL345 Acceleration (Signed X, Y, Z + Dynamic)
-               2. FC-03 Optical Tachometer Pulses & Shaft RPM
+               1. 400 Hz 3-Axis ADXL345 Acceleration (+/-2g Full Resolution)
+                  Signed X, Y, Z + Dynamic Acceleration (Gravity Decoupled)
+               2. FC-03 Optical Tachometer Pulses & Shaft RPM (GPIO 4 Interrupt)
                3. 10,000 Hz 4-Channel INMP441 Microphone Array PCM Audio
-               4. Packet sequence, monotonic host arrival timestamps & integrity logs
+               4. Monotonic host arrival timestamps & sequence integrity logs
+
+Timing Architecture:
+  - Host arrival timestamps: time.monotonic() elapsed offset from stream start.
+  - Recording start/end metadata: ISO 8601 UTC/local wall-clock timestamps.
+  - Accelerometer sample times: Estimated via nominal 400Hz FIFO spacing
+    relative to packet receive time. (Hardware per-sample clocks are absent).
+  - Packet-level cross-modal sync is bounded by ~12.8ms Type 0x05 packet duration.
 
 Dataset Structure:
   data/dataset/<run_id>/
-    ├── metadata.json       (Complete metadata, provenance, motor ID, condition)
+    ├── metadata.json       (Provenance, configuration, RPM, vibration metrics, status)
     ├── vibration.csv       (Signed X, Y, Z acceleration + dynamic vibration)
-    ├── packet_log.csv      (Packet seq, arrival time, sample indices, checksum)
+    ├── packet_log.csv      (Packet seq, monotonic arrival time, sample indices, checksum)
     └── audio_4ch.wav       (4-channel 16-bit 10kHz PCM audio)
   data/dataset/manifest.json (Global registry of all recorded runs)
 
@@ -26,6 +34,7 @@ Author: Antigravity Autonomous Agent (TinyML Motor Diagnostics Suite)
 import os
 import sys
 import time
+import uuid
 import struct
 import argparse
 import json
@@ -72,7 +81,8 @@ class MotorExperimentRecorder:
         session_id: Optional[str] = None,
         output_dir: Optional[str] = None,
         notes: str = "",
-        use_synthetic: bool = False
+        use_synthetic: bool = False,
+        stall_timeout_s: float = 2.0
     ):
         self.motor_id = motor_id.strip()
         self.health_label = health_label.lower().strip()
@@ -86,17 +96,25 @@ class MotorExperimentRecorder:
         self.pulses_per_rev = max(1, int(pulses_per_rev))
         self.notes = notes
         self.use_synthetic = use_synthetic
+        self.stall_timeout_s = float(stall_timeout_s)
 
-        # Generate unique timestamped IDs
+        # Firmware hardware configuration constants
+        self.accel_range_g = 2.0  # Firmware DATA_FORMAT = 0x08 (+/-2g Full Res, 3.9 mg/LSB)
+
+        # Generate collision-resistant unique run ID with microsecond timestamp + short UUID
         now_dt = datetime.now()
-        date_str = now_dt.strftime("%Y%m%d")
-        time_str = now_dt.strftime("%Y%m%d_%H%M%S")
-        self.session_id = session_id.strip() if session_id else f"sess_{date_str}"
-        self.run_id = f"run_{time_str}_{self.motor_id}_{self.health_label}_{self.environment}"
+        time_micro_str = now_dt.strftime("%Y%m%d_%H%M%S_%f")
+        short_uuid = uuid.uuid4().hex[:6]
+
+        self.session_id = session_id.strip() if session_id else "session_pilot_01"
+        self.run_id = f"run_{time_micro_str}_{short_uuid}_{self.motor_id}_{self.health_label}_{self.environment}"
 
         self.base_output_dir = output_dir if output_dir else os.path.join(BASE_DIR, "data", "dataset")
         self.run_dir = os.path.join(self.base_output_dir, self.run_id)
-        os.makedirs(self.run_dir, exist_ok=True)
+        # NOTE: Do NOT create directory here. Directory is created exclusively on successful save.
+
+        # Recording status tracking: COMPLETE, INTERRUPTED, INCOMPLETE, FAILED
+        self.recording_status = "INITIALIZING"
 
         # Buffers for recording
         self.packet_records: List[Dict[str, Any]] = []
@@ -109,11 +127,14 @@ class MotorExperimentRecorder:
         self.checksum_errors = 0
         self.last_seq: Optional[int] = None
         self.last_pulse_count = 0
-        self.last_pulse_time = 0.0
+        self.last_pulse_time_mono = 0.0
         self.current_rpm: Optional[float] = None
         self.rpm_history: List[float] = []
         self.all_tach_pulses: List[int] = []
 
+        # Monotonic and wall-clock times
+        self.start_mono = 0.0
+        self.end_mono = 0.0
         self.start_iso = ""
         self.end_iso = ""
         self.actual_duration_s = 0.0
@@ -122,6 +143,7 @@ class MotorExperimentRecorder:
         """Acquires physical streaming telemetry from ESP32 on COM8."""
         if not SERIAL_AVAILABLE:
             print("[ERROR] pySerial is not installed. Run: pip install pyserial", file=sys.stderr)
+            self.recording_status = "FAILED"
             return False
 
         print(f"[*] Connecting to ESP32 on {self.port} at {self.baudrate} baud...")
@@ -141,31 +163,44 @@ class MotorExperimentRecorder:
         except Exception as exc:
             print(f"[-] ERROR: Failed to open serial port {self.port}: {exc}", file=sys.stderr)
             print("    Check: Is the ESP32 plugged in? Is another app (GUI/serial monitor) locking the port?", file=sys.stderr)
+            self.recording_status = "FAILED"
             return False
 
         print(f"[+] Connected to {self.port}!")
         print(f"[*] Run ID       : {self.run_id}")
+        print(f"[*] Session ID   : {self.session_id}")
         print(f"[*] Target State : Motor={self.motor_id} | Health={self.health_label.upper()} | Env={self.environment.upper()}")
         print(f"[*] Target Time  : {self.duration:.1f} seconds (Press Ctrl+C to stop cleanly)\n")
 
         HEADER_FORMAT = "<BBBBHHHBBI"
         HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
         rx_buf = bytearray()
-        t_start = time.time()
+
+        self.start_mono = time.monotonic()
+        self.last_pulse_time_mono = self.start_mono
+        last_packet_time_mono = self.start_mono
         self.start_iso = datetime.now(timezone.utc).astimezone().isoformat()
-        self.last_pulse_time = t_start
 
         # Detrending state for dynamic vibration
         grav_x, grav_y, grav_z = 0.0, 0.0, -0.82
         total_audio_samples = 0
         total_vib_samples = 0
 
-        # Initial packet arrival watchdog (wait max 3.0s for first valid packet)
         first_packet_received = False
-        watchdog_start = time.time()
+        watchdog_timeout_s = 3.0
+        stream_stalled = False
 
         try:
-            while (time.time() - t_start) < self.duration:
+            while (time.monotonic() - self.start_mono) < self.duration:
+                now_mono = time.monotonic()
+
+                # Stall detection: If packets started arriving, but stop for > stall_timeout_s
+                if first_packet_received and (now_mono - last_packet_time_mono) > self.stall_timeout_s:
+                    print(f"\n[-] ERROR: Serial stream stalled! No packets received for {now_mono - last_packet_time_mono:.1f}s.", file=sys.stderr)
+                    stream_stalled = True
+                    self.recording_status = "INTERRUPTED"
+                    break
+
                 n = ser.in_waiting
                 if n > 0:
                     rx_buf.extend(ser.read(n))
@@ -202,12 +237,24 @@ class MotorExperimentRecorder:
                         chk = compute_checksum(bytes(rx_buf[:total_len - 2]))
                         if chk != exp_chk:
                             self.checksum_errors += 1
+                            # Log corrupt packet in packet records
+                            self.packet_records.append({
+                                "pkt_seq": seq,
+                                "host_recv_time_s": round(now_mono - self.start_mono, 6),
+                                "num_vib": num_vib,
+                                "block_frames": blk,
+                                "audio_sample_idx": total_audio_samples,
+                                "vib_sample_idx": total_vib_samples,
+                                "tach_pulses": pulses,
+                                "checksum_valid": 0,
+                                "seq_gap": 0
+                            })
                             del rx_buf[:2]
                             continue
 
                         # Valid Type 0x05 packet received
                         first_packet_received = True
-                        now = time.time()
+                        last_packet_time_mono = now_mono
                         self.total_packets += 1
 
                         seq_gap = 0
@@ -219,8 +266,8 @@ class MotorExperimentRecorder:
                                     self.dropped_packets += seq_gap
                         self.last_seq = seq
 
-                        # Tachometer & RPM calculation
-                        dt_p = now - self.last_pulse_time
+                        # Tachometer & RPM calculation using monotonic interval
+                        dt_p = now_mono - self.last_pulse_time_mono
                         if dt_p >= 0.5:
                             dp = pulses - self.last_pulse_count
                             if dp > 0 and dt_p > 0:
@@ -230,14 +277,15 @@ class MotorExperimentRecorder:
                                 self.current_rpm = 0.0
                                 self.rpm_history.append(0.0)
                             self.last_pulse_count = pulses
-                            self.last_pulse_time = now
+                            self.last_pulse_time_mono = now_mono
 
                         self.all_tach_pulses.append(pulses)
 
-                        # Log packet metadata
+                        # Log valid packet record
+                        t_pkt = now_mono - self.start_mono
                         self.packet_records.append({
                             "pkt_seq": seq,
-                            "host_recv_time_s": round(now - t_start, 6),
+                            "host_recv_time_s": round(t_pkt, 6),
                             "num_vib": num_vib,
                             "block_frames": blk,
                             "audio_sample_idx": total_audio_samples,
@@ -247,7 +295,7 @@ class MotorExperimentRecorder:
                             "seq_gap": seq_gap
                         })
 
-                        # Parse vibration payload
+                        # Parse vibration payload (int16 signed mg / 1000.0 -> g)
                         if num_vib > 0:
                             vib_raw = np.frombuffer(
                                 bytes(rx_buf[HEADER_SIZE : HEADER_SIZE + vib_len]),
@@ -255,7 +303,6 @@ class MotorExperimentRecorder:
                             ).reshape((num_vib, 3))
 
                             dt_vib = 1.0 / 400.0
-                            t_pkt = now - t_start
                             t_v_start = t_pkt - (num_vib - 1) * dt_vib
 
                             for v_idx in range(num_vib):
@@ -291,7 +338,7 @@ class MotorExperimentRecorder:
                                 })
                             total_vib_samples += num_vib
 
-                        # Parse audio payload
+                        # Parse audio payload (16-bit PCM normalized float32)
                         audio_raw = np.frombuffer(
                             bytes(rx_buf[HEADER_SIZE + vib_len : HEADER_SIZE + vib_len + audio_len]),
                             dtype=np.int16
@@ -302,7 +349,7 @@ class MotorExperimentRecorder:
                         del rx_buf[:total_len]
 
                         # Progress ticker
-                        elapsed = now - t_start
+                        elapsed = now_mono - self.start_mono
                         pct = min(100.0, (elapsed / self.duration) * 100.0)
                         cur_rpm_str = f"{self.current_rpm:.0f}" if self.current_rpm is not None else "WAIT"
                         mean_dyn = np.mean([r["dyn_mag_g"] for r in self.vibration_records[-20:]]) if self.vibration_records else 0.0
@@ -310,30 +357,51 @@ class MotorExperimentRecorder:
                             f"\r[{self.health_label.upper()}|{self.environment.upper()}] "
                             f"{elapsed:4.1f}s/{self.duration:4.1f}s ({pct:4.1f}%) | "
                             f"Pkts:{self.total_packets:4d} | RPM:{cur_rpm_str:>5} (Pulses:{pulses}) | "
-                            f"DynVib:{mean_dyn:5.3f}g | Drops:{self.dropped_packets}"
+                            f"DynVib:{mean_dyn:5.3f}g | Drops:{self.dropped_packets} | ChkErr:{self.checksum_errors}"
                         )
                         sys.stdout.flush()
                     else:
                         del rx_buf[:2]
 
-                if not first_packet_received and (time.time() - watchdog_start) > 2.5:
-                    print("\n[-] ERROR: Watchdog timeout (2.5s) with 0 valid Type 0x05 packets received.", file=sys.stderr)
-                    print("    Physical acquisition aborted. Check ESP32 firmware & baudrate.", file=sys.stderr)
+                # Watchdog for first valid packet arrival
+                if not first_packet_received and (now_mono - self.start_mono) > watchdog_timeout_s:
+                    print(f"\n[-] ERROR: Watchdog timeout ({watchdog_timeout_s:.1f}s) with 0 valid Type 0x05 packets received.", file=sys.stderr)
+                    print("    Physical acquisition aborted. Check ESP32 power, firmware & baudrate.", file=sys.stderr)
+                    self.recording_status = "FAILED"
                     return False
 
-                time.sleep(0.004)
+                time.sleep(0.003)
 
         except KeyboardInterrupt:
             print("\n[*] Recording interrupted by user. Finalizing captured buffers...")
+            self.recording_status = "INTERRUPTED"
         finally:
             try:
                 ser.close()
             except Exception:
                 pass
 
+        self.end_mono = time.monotonic()
         self.end_iso = datetime.now(timezone.utc).astimezone().isoformat()
-        self.actual_duration_s = round(time.time() - t_start, 3)
+        self.actual_duration_s = round(self.end_mono - self.start_mono, 3)
         print()
+
+        # Evaluate final status
+        expected_vib_min = int(self.duration * 400.0 * 0.90)
+        expected_aud_min = int(self.duration * 10000.0 * 0.90)
+
+        if not first_packet_received:
+            self.recording_status = "FAILED"
+            return False
+
+        if stream_stalled or self.recording_status == "INTERRUPTED":
+            self.recording_status = "INTERRUPTED"
+        elif total_vib_samples >= expected_vib_min and total_audio_samples >= expected_aud_min and self.actual_duration_s >= (self.duration * 0.90):
+            self.recording_status = "COMPLETE"
+        else:
+            self.recording_status = "INCOMPLETE"
+
+        # Return True if enough data was captured to write diagnostic artifacts
         return len(self.vibration_records) > 50 and len(self.audio_frames) > 5
 
     def generate_synthetic_testbench_run(self):
@@ -342,7 +410,7 @@ class MotorExperimentRecorder:
         Provenance is strictly labeled as SYNTHETIC_TESTBENCH.
         """
         print(f"[*] Generating SYNTHETIC TESTBENCH run ({self.health_label.upper()} | {self.environment.upper()}) for {self.duration}s...")
-        t_start = time.time()
+        self.start_mono = time.monotonic()
         self.start_iso = datetime.now(timezone.utc).astimezone().isoformat()
 
         fs_vib = 400.0
@@ -360,10 +428,10 @@ class MotorExperimentRecorder:
             az_dyn = 0.015 * np.sin(4 * np.pi * f0 * t_vib) + np.random.normal(0, 0.010, n_vib)
             audio_base_amp = 0.010
         else:
-            # Defective motor: elevated 1X & 2X harmonics
-            ax_dyn = 0.420 * np.sin(2 * np.pi * f0 * t_vib) + 0.08 * np.sin(4 * np.pi * f0 * t_vib) + np.random.normal(0, 0.020, n_vib)
-            ay_dyn = 0.380 * np.cos(2 * np.pi * f0 * t_vib) + 0.07 * np.cos(4 * np.pi * f0 * t_vib) + np.random.normal(0, 0.020, n_vib)
-            az_dyn = 0.180 * np.sin(2 * np.pi * f0 * t_vib) + np.random.normal(0, 0.020, n_vib)
+            # Defective motor: elevated vibration within +/-2g range
+            ax_dyn = 0.380 * np.sin(2 * np.pi * f0 * t_vib) + 0.08 * np.sin(4 * np.pi * f0 * t_vib) + np.random.normal(0, 0.020, n_vib)
+            ay_dyn = 0.350 * np.cos(2 * np.pi * f0 * t_vib) + 0.07 * np.cos(4 * np.pi * f0 * t_vib) + np.random.normal(0, 0.020, n_vib)
+            az_dyn = 0.160 * np.sin(2 * np.pi * f0 * t_vib) + np.random.normal(0, 0.020, n_vib)
             audio_base_amp = 0.035
 
         if self.environment == "disturbance":
@@ -414,7 +482,7 @@ class MotorExperimentRecorder:
         self.audio_frames = [audio_mat]
         self.total_packets = int(self.duration * 78.1)
 
-        # Synthesize packet log
+        # Synthesize packet log with sequence numbers
         n_pkts = max(1, self.total_packets)
         cum_aud = 0
         cum_vib = 0
@@ -430,15 +498,20 @@ class MotorExperimentRecorder:
                 "audio_sample_idx": cum_aud,
                 "vib_sample_idx": cum_vib,
                 "tach_pulses": int(p * (base_rpm / 60.0) * (self.duration / n_pkts) * self.pulses_per_rev),
-                "checksum_valid": True,
+                "checksum_valid": 1,
                 "seq_gap": 0
             })
 
+        self.end_mono = time.monotonic()
         self.end_iso = datetime.now(timezone.utc).astimezone().isoformat()
         self.actual_duration_s = round(self.duration, 3)
+        self.recording_status = "COMPLETE"
 
     def save_dataset_artifacts(self) -> Dict[str, str]:
         """Saves vibration.csv, audio_4ch.wav, packet_log.csv, and metadata.json to run_dir."""
+        # Create run_dir exclusively. Never use exist_ok=True
+        os.makedirs(self.run_dir, exist_ok=False)
+
         vibration_csv_path = os.path.join(self.run_dir, "vibration.csv")
         audio_wav_path = os.path.join(self.run_dir, "audio_4ch.wav")
         packet_log_path = os.path.join(self.run_dir, "packet_log.csv")
@@ -457,6 +530,7 @@ class MotorExperimentRecorder:
                 )
 
         # 2. Write audio_4ch.wav
+        full_audio = None
         if self.audio_frames:
             full_audio = np.vstack(self.audio_frames)
             audio_int16 = (np.clip(full_audio, -1.0, 1.0) * 32767.0).astype(np.int16)
@@ -523,6 +597,7 @@ class MotorExperimentRecorder:
             "acoustic_environment": self.environment,
             "fault_type": self.fault_type,
             "disturbance_description": self.disturbance_desc,
+            "recording_status": self.recording_status,
             "supply_voltage_v": self.supply_voltage,
             "pulses_per_rev": self.pulses_per_rev,
             "target_duration_s": self.duration,
@@ -532,7 +607,8 @@ class MotorExperimentRecorder:
             "sample_rate_audio_hz": 10000.0,
             "sample_rate_vib_nominal_hz": 400.0,
             "audio_channels": 4,
-            "audio_frames_total": len(full_audio) if self.audio_frames else 0,
+            "accel_configured_range_g": self.accel_range_g,
+            "audio_frames_total": len(full_audio) if full_audio is not None else 0,
             "vibration_samples_total": len(self.vibration_records),
             "total_packets_received": self.total_packets,
             "dropped_packets": self.dropped_packets,
@@ -548,7 +624,8 @@ class MotorExperimentRecorder:
             "is_synthetic": bool(self.use_synthetic),
             "data_provenance": provenance,
             "firmware_protocol": "ESP32 Type 0x05 (10kHz 4-Mic Dual-I2S + 400Hz ADXL345 FIFO + FC-03)",
-            "timing_note": "Host arrival timestamps derived from monotonic receive time and nominal 400Hz FIFO spacing. Not absolute hardware synchronized timestamps.",
+            "timing_note": "Host arrival timestamps are monotonic offsets (time.monotonic) from stream start. Accelerometer sample timestamps are estimated based on nominal 400Hz FIFO spacing relative to packet arrival. The current Type 0x05 firmware does not provide independent per-sample hardware clock timestamps.",
+            "sync_disclaimer": "Dual-I2S audio (10kHz) and ADXL345 vibration (400Hz) are co-streamed in Type 0x05 packets. Packet-level synchronization is bounded by packet duration (~12.8ms). Sub-millisecond cross-modal hardware synchronization is not provided.",
             "notes": self.notes
         }
 
@@ -561,23 +638,24 @@ class MotorExperimentRecorder:
         self._update_global_manifest(manifest_path, metadata)
 
         # 6. Legacy compatibility: Mirror latest run into data/experiments/ for compare_motor_experiments.py
-        if not self.use_synthetic:
+        if not self.use_synthetic and self.recording_status == "COMPLETE":
             self._mirror_legacy_experiment(vibration_csv_path, audio_wav_path, metadata)
 
         # Print Pretty Summary Card
-        print("\n" + "=" * 74)
+        print("\n" + "=" * 76)
         print(f" EXPERIMENT RECORDING COMPLETE: {self.run_id}")
-        print("=" * 74)
+        print("=" * 76)
+        print(f" Status               : {self.recording_status}")
         print(f" Motor ID             : {self.motor_id}")
         print(f" Health Label         : {self.health_label.upper()} (Fault: {self.fault_type})")
         print(f" Acoustic Environment : {self.environment.upper()} ({self.disturbance_desc or 'None'})")
         print(f" Shaft Speed          : {f'{mean_rpm:.1f} RPM' if rpm_valid else 'UNAVAILABLE (0 pulses or stopped)'}")
-        print(f" Dynamic Vibration    : {mean_dyn:.4f}g (Peak: {peak_dyn:.4f}g)")
+        print(f" Dynamic Vibration    : {mean_dyn:.4f}g (Peak: {peak_dyn:.4f}g, Range: +/-{self.accel_range_g}g)")
         print(f" 1X / 2X Order Energy : 1X={e1_pct:.1f}% | 2X={e2_pct:.1f}%")
-        print(f" Packets / Drops      : {self.total_packets} received / {self.dropped_packets} dropped")
+        print(f" Packets / Drops      : {self.total_packets} received / {self.dropped_packets} dropped | Checksum Errors: {self.checksum_errors}")
         print(f" Data Provenance      : {provenance}")
         print(f" Saved Run Directory  : {os.path.relpath(self.run_dir, BASE_DIR)}")
-        print("=" * 74 + "\n")
+        print("=" * 76 + "\n")
 
         return {
             "run_dir": self.run_dir,
@@ -596,7 +674,6 @@ class MotorExperimentRecorder:
             except Exception:
                 pass
 
-        # Check if run already registered
         existing_ids = [r["run_id"] for r in manifest_data.get("runs", [])]
         summary_entry = {
             "run_id": meta["run_id"],
@@ -605,6 +682,7 @@ class MotorExperimentRecorder:
             "motor_health_label": meta["motor_health_label"],
             "acoustic_environment": meta["acoustic_environment"],
             "fault_type": meta["fault_type"],
+            "recording_status": meta["recording_status"],
             "duration_s": meta["actual_duration_s"],
             "measured_rpm": meta["measured_rpm"],
             "rpm_valid": meta["rpm_valid"],
@@ -658,9 +736,7 @@ class MotorExperimentRecorder:
     def run(self) -> bool:
         if not self.use_synthetic:
             success = self.record_hardware()
-            if not success:
-                print("\n[-] ACQUISITION ABORTED: Physical recording failed. Zero valid packets captured.")
-                print("    Physical dataset integrity strictly enforced: No fake files written.")
+            if not success or self.recording_status == "FAILED":
                 return False
         else:
             self.generate_synthetic_testbench_run()
@@ -678,14 +754,14 @@ def main():
     parser.add_argument("--environment", choices=["quiet", "disturbance"], default=None,
                         help="Acoustic environmental context: quiet or disturbance")
     parser.add_argument("--fault-type", choices=["none", "unknown", "unbalance", "misalignment", "bearing", "other"],
-                        default="none", help="Specific verified mechanical fault type")
+                        default=None, help="Specific verified mechanical fault type (default: 'unknown' for defective, 'none' for healthy)")
     parser.add_argument("--disturbance-desc", type=str, default="", help="Description of acoustic disturbance (e.g. loudspeaker, clap)")
     parser.add_argument("--duration", type=float, default=30.0, help="Recording duration in seconds (default: 30.0s)")
     parser.add_argument("--port", type=str, default="COM8", help="ESP32 serial port (default: COM8)")
     parser.add_argument("--baud", type=int, default=921600, help="ESP32 baudrate (default: 921600)")
     parser.add_argument("--supply-voltage", type=float, default=None, help="Motor DC power supply voltage (V)")
     parser.add_argument("--pulses-per-rev", "--ppr", type=int, default=1, help="Tachometer optical pulses per revolution")
-    parser.add_argument("--session-id", type=str, default=None, help="Grouping identifier for recording session")
+    parser.add_argument("--session-id", type=str, default=None, help="Grouping identifier for recording session (e.g. session_01_pilot)")
     parser.add_argument("--output-dir", type=str, default=None, help="Base dataset directory (default: data/dataset)")
     parser.add_argument("--notes", type=str, default="", help="Observational notes")
     parser.add_argument("--synthetic", action="store_true", help="Explicit offline testbench simulation (for unit tests only)")
@@ -719,6 +795,8 @@ def main():
         health_label = "healthy"
     if environment is None:
         environment = "quiet"
+    if fault_type is None:
+        fault_type = "unknown" if health_label == "defective" else "none"
 
     recorder = MotorExperimentRecorder(
         motor_id=args.motor_id,

@@ -1,14 +1,15 @@
 @echo off
 @chcp 65001 >nul
-title Record Acoustic Disturbance Rejection Experiment (30 Seconds)
+title Record Healthy Motor + Acoustic Disturbance (30 Seconds)
 color 0E
 cls
 echo ================================================================================
-echo          SPATIAL MULTIMODAL MOTOR RECORDER: ACOUSTIC DISTURBANCE TEST (30s)
+echo          SPATIAL MULTIMODAL MOTOR RECORDER: HEALTHY + DISTURBANCE (30s)
 echo          Proves Environmental Acoustic Noise != Internal Mechanical Fault
 echo ================================================================================
 echo.
-echo [INSTRUCTION] Run healthy DC motor while introducing external noise (speech/music/claps).
+echo [INSTRUCTION] Run healthy DC motor (motor_A) while introducing external sound
+echo               (phone speech/music/claps) 30-50cm from the microphone array.
 echo               Close any open radar GUI (COM8 will be used exclusively).
 echo               Duration: 30.0s (Captures ~12,000 vibration and ~300,000 audio samples).
 echo.
