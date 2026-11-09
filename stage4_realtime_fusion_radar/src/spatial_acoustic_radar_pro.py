@@ -73,6 +73,12 @@ ACOUSTIC_HEAT_CMAP = LinearSegmentedColormap.from_list(
 
 # Frame & Animation Timing
 UPDATE_INTERVAL_MS = 50     # 20 FPS GUI refresh
+
+# Preliminary Empirical Sensitivity Calibration Factors (Controlled-tone experiment relative to MIC3=1.00)
+# MIC1=1.09, MIC2=2.47 (weak mic analog compensation), MIC3=1.00, MIC4=1.41
+# Applied exclusively to floating-point amplitude analysis (VU meters, flank energy balance).
+# Raw audio passed to GCC-PHAT / SRP-PHAT remains unscaled to prevent artificial noise inflation.
+PRELIM_MIC_SENSITIVITY_GAINS = np.array([1.09, 2.47, 1.00, 1.41], dtype=np.float32)
 HEATMAP_SMOOTH_ALPHA = 0.30  # Surface temporal smoothing
 
 
@@ -586,10 +592,7 @@ class SRPPhatEngine:
         for p_idx, (i, j) in enumerate(geometry.pairs):
             if i >= num_mics or j >= num_mics:
                 continue
-            if ch_status[i] == "DEAD" or ch_status[j] == "DEAD":
-                continue
-            # When at least 2 microphones are actively receiving sound, prioritize active pairs
-            if active_ch_count >= 2 and (ch_status[i] != "ACTIVE" or ch_status[j] != "ACTIVE"):
+            if ch_status[i] in ("DEAD", "CLIPPED") or ch_status[j] in ("DEAD", "CLIPPED"):
                 continue
 
             sig_i = signals[:, i]
@@ -2427,7 +2430,9 @@ class AcousticRadarApp:
                     self.wave_lines[i].set_data(x_axis, scaled_wave)
 
                     dbfs = 20.0 * math.log10(max(r_val, 1e-5))
-                    status_str = "ACTIVE" if r_val > 0.0020 else "QUIET "
+                    gain = float(PRELIM_MIC_SENSITIVITY_GAINS[i]) if i < len(PRELIM_MIC_SENSITIVITY_GAINS) else 1.0
+                    r_calib = r_val * gain
+                    status_str = "ACTIVE" if (r_val > 0.0018 or r_calib > 0.0030) else "QUIET "
                     self.vu_texts[i].set_text(f"M{i+1}: RMS={r_val:.4f} ({dbfs:+.1f}dB) | {status_str}")
                 else:
                     self.wave_lines[i].set_data([], [])

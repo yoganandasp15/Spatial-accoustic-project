@@ -39,18 +39,22 @@
 ### 2.3 FC-03 Optical Tachometer
 * **VCC:** 3.3V
 * **GND:** Ground
-* **DO (Digital Out):** D4 (GPIO 4) configured with `RISING` hardware interrupt service routine (`fc03_isr`) with 2500 µs refractory debounce filter against LM393 comparator chatter.
+* **DO (Digital Out):** D4 (GPIO 4) configured with `FALLING` hardware interrupt service routine (`fc03_isr`) with `INPUT_PULLUP` and 200 µs refractory debounce filter (supporting up to 5,000 pulses/sec = 15,000 RPM at 20 PPR, or 300,000 RPM at 1 PPR), matching active-low optical blade entry. Live pin state is monitored via `digitalRead(FC03_DO_PIN)` in diagnostic mode (`X` key).
 * **AO (Analog Out):** Unconnected / Not needed.
 
 ---
 
 ## 3. Communication Link & Streaming Protocol
 * **Serial Port:** COM8
-* **Baud Rate:** 1,152,000 baud (8-N-1, raw link limit $115,200\text{ bytes/s}$, providing $24.7\%$ bandwidth headroom).
-* **Audio Format:** 11,025 Hz, 4 channels, 16-bit signed PCM (unpacked from INMP441 24-bit MSB-aligned slot via `>> 16`).
-* **Frame Chunk Size:** 128 samples per block (11.61 ms packet interval, 86.13 packets/sec).
+* **Baud Rate:** 921,600 baud (CP2102 hardware limit with zero bit/framing errors, raw channel capacity $92,160\text{ bytes/s}$; receiver also supports 1,152,000 baud).
+* **Audio Format:** 10,000 Hz, 4 channels, 16-bit signed PCM (unpacked from INMP441 24-bit MSB-aligned slot via `>> 16`).
+* **Frame Chunk Size:** 128 samples per block (12.8 ms packet interval, 78.125 packets/sec).
 * **Packet Structure (Type 0x05):** 16-byte `PacketHeader` + $N \times 6$-byte ADXL345 samples (typically 4–5 samples, max 8) + 1024-byte audio chunk (128 frames x 4 ch x 2 bytes) + 2-byte 16-bit XOR checksum (seed `0x55AA`) = 1,072 bytes per packet.
-* **Streaming Throughput:** $86.1328\text{ pkt/s} \times 1,072\text{ B/pkt} = 92,334.4\text{ B/s} = 92.33\text{ kB/s}$ ($80.15\%$ link utilization, $24.7\%$ headroom).
+* **Streaming Throughput:** $78.125\text{ pkt/s} \times 1,072\text{ B/pkt} = 83,750\text{ B/s} = 83.75\text{ kB/s}$ ($90.9\%$ link utilization at 921,600 baud, $9.1\%$ headroom; $72.7\%$ link utilization at 1.152M baud).
+* **Channel Unpacking (I2S_CHANNEL_FMT_RIGHT_LEFT):**
+  * DMA Word 0 (`[2*i]`): Right channel (tied to 3.3V: Mic 2 on GPIO 19, Mic 4 on GPIO 23)
+  * DMA Word 1 (`[2*i+1]`): Left channel (tied to GND: Mic 1 on GPIO 19, Mic 3 on GPIO 23)
+  * Firmly mapped: `m1 = dma_rx0[2*i+1]`, `m2 = dma_rx0[2*i]`, `m3 = dma_rx1[2*i+1]`, `m4 = dma_rx1[2*i]` to maintain physical left-to-right ordering across breadboard.
 * **UART TX Buffer:** Initialized with `Serial.setTxBufferSize(4096)` in `setup()`, allowing non-blocking DMA transmission without stalling the audio loop.
 * **Packet Integrity & Validation:** Contiguous 16-bit XOR checksum computed across header and payloads; sequence counter continuity verified in Python receiver; dropped packet count tracked in real time.
 * **Orientation-Invariant Order Tracking & ISO Velocity:**

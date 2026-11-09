@@ -71,7 +71,7 @@ Spatial-accoustic-project/
 │   └── evidence/                                # Error distributions, CDFs, and heatmaps
 │
 ├── stage3_esp32_firmware/                       # STAGE 3: Production embedded firmware
-│   └── ESP32_Spatial_Acoustic_Radar_Firmware/   # 11,025 Hz 4-ch DMA streaming on COM8 (>>16)
+│   └── ESP32_Spatial_Acoustic_Radar_Firmware/   # 10,000 Hz 4-ch DMA streaming on COM8 (>>16)
 │
 ├── stage4_realtime_fusion_radar/                # STAGE 4: Real-time GUI & Golden Baseline
 │   └── src/spatial_acoustic_radar_pro.py        # Master interactive radar application
@@ -89,7 +89,7 @@ To ensure complete academic integrity, project evidence is strictly separated in
 | :--- | :--- | :--- | :---: | :--- |
 | **Tier 1** | Machine Fault Physics (Stage 1) | **MAFAULDA & CWRU Datasets** | **VERIFIED** | 10g unbalance surges $1\times$ order energy to 66.6% (vs 8.4% Normal); tachometer matches spectrum within 0.047% |
 | **Tier 2** | Acoustic Localization (Stage 2) | **Numerical Simulation Proof**| **VERIFIED** | **0.34° median error** across 25 off-grid test points; 100% pass rate (<5°); robust down to 10 dB SNR |
-| **Tier 3** | Embedded Hardware (Stage 3) | **Classic ESP32 Prototype** | **VERIFIED** | Dual-I2S clock-locked 11,025 Hz 4-ch PCM (`>>16`), ADXL345 400 Hz FIFO ($a_z \approx -0.82g$), FC-03 tachometer on COM8 @ 1,152,000 baud |
+| **Tier 3** | Embedded Hardware (Stage 3) | **Classic ESP32 Prototype** | **VERIFIED** | Dual-I2S clock-locked 10,000 Hz 4-ch PCM (`>>16`), ADXL345 400 Hz FIFO ($a_z \approx -0.82g$), FC-03 tachometer on COM8 @ 921,600 baud |
 | **Tier 4** | Multimodal Fusion HUD (Stage 4) | **Live Interactive GUI** | **VERIFIED** | Live 2D acoustic camera (DOA $\theta$ focus), ISO-inspired severity, Kurtosis $\kappa$, and Golden Baseline (Key `'B'`) |
 
 ---

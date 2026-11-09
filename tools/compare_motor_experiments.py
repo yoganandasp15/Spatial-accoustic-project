@@ -207,23 +207,37 @@ def generate_comparison_plots(h_res, d_res, dist_res=None):
         v_d = dist_res["dyn_mag"][:n_dist]
 
         # Extract real acoustic energy envelope from recorded WAV file
-        wav_dist_path = os.path.join(EXP_DIR, "motor_disturbance_audio.wav")
-        ac_label = "Microphone Acoustic Energy (Raw Sensor Ingestion)"
+        wav_candidates = [
+            os.path.join(EXP_DIR, "motor_disturbance_run_audio.wav"),
+            os.path.join(EXP_DIR, "motor_disturbance_audio.wav")
+        ]
+        wav_dist_path = None
+        for cand in wav_candidates:
+            if os.path.exists(cand):
+                wav_dist_path = cand
+                break
+
+        ac_label = "Microphone Acoustic Energy (Awaiting Physical Recording)"
         ac_data = np.zeros_like(v_d)
 
-        if os.path.exists(wav_dist_path):
+        if wav_dist_path is not None:
             try:
                 from scipy.io import wavfile
                 fs_w, w_samples = wavfile.read(wav_dist_path)
                 if w_samples.ndim > 1:
-                    ch0 = w_samples[:, 0].astype(np.float32) / 32768.0
+                    ch0 = w_samples[:, 0].astype(np.float64) / 32768.0
                 else:
-                    ch0 = w_samples.astype(np.float32) / 32768.0
+                    ch0 = w_samples.astype(np.float64) / 32768.0
 
-                # Compute RMS envelope across matching time window
-                step = max(1, len(ch0) // len(t_d))
-                ac_data = np.abs(ch0[:len(t_d) * step:step][:len(t_d)])
-                ac_label = "Microphone Acoustic Amplitude (Recorded from motor_disturbance_audio.wav)"
+                # Compute genuine windowed RMS acoustic energy envelope across matching time window
+                n_pts = len(t_d)
+                block_size = max(1, len(ch0) // n_pts)
+                ac_data = np.zeros(n_pts, dtype=np.float64)
+                for b in range(n_pts):
+                    seg = ch0[b * block_size : (b + 1) * block_size]
+                    if len(seg) > 0:
+                        ac_data[b] = float(np.sqrt(np.mean(seg**2)))
+                ac_label = f"Microphone Acoustic RMS Envelope (Recorded from {os.path.basename(wav_dist_path)})"
             except Exception:
                 ac_data = np.zeros_like(v_d)
 

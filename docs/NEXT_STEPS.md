@@ -20,7 +20,7 @@ All planned core engineering milestones, architectural remediations, and automat
 - **Milestone 2 (ESP32 Firmware Continuous 400 Hz Streaming & Receiver Upgrade):**
   * Configured ADXL345 in 32-sample Stream FIFO mode (`FIFO_CTL = 0x80`) at 400 Hz ODR in `ESP32_Spatial_Acoustic_Radar_Firmware.ino`.
   * Upgraded binary packet protocol to Type 0x05 (16B header, $N$ accelerometer records, 1024B audio, 16-bit XOR checksum with `0x55AA` seed).
-  * Upgraded UART communication to 1,152,000 baud providing 24.7% bandwidth headroom.
+  * Configured primary UART communication to 921,600 baud (zero framing errors on CP2102; receiver also supports 1,152,000 baud).
   * Enhanced serial receiver in `spatial_acoustic_radar_pro.py` with defensive boundary checks, buffer shape validation, sequence roll-over handling, and batched timestamp monotonicity enforcement.
 
 - **Milestone 3 (Automated Test Suite Expansion & Anti-Tautology Verification):**
@@ -28,7 +28,7 @@ All planned core engineering milestones, architectural remediations, and automat
   * Segregated physical hardware ping tests behind `@unittest.skipUnless(ENABLE_HARDWARE_TESTS=1)`.
   * Implemented adversarial stress suites (`test_m1_adversarial_stress.py`, `test_m2_firmware_protocol.py`, `test_m2_stress_adversarial.py`).
   * Created anti-tautology mutation suite (`test_m3_mutation_adversarial.py`) achieving 100% kill rate across 6 deliberate algorithmic mutants.
-  * Repository-wide test pass rate: **44/44 tests passing (1 segregated hardware test skipped)**.
+  * Repository-wide test pass rate: **55/55 tests passing (1 segregated hardware test skipped)**.
 
 - **Milestone 4 (Repository Documentation & Log Reconciliation):**
   * Reconciled all historical commit SHAs in `docs/AGENT_SYNCHRONIZATION_LOG.md` against git history.
@@ -58,7 +58,7 @@ While the entire algorithmic pipeline, firmware binary framing, serial receiver,
 ### Dataset B: Simultaneous Optical Tachometer Pulse Trains with Dynamic Speed Variation
 - **Objective:** Validate angular domain resampling, fractional interpolation, and order tracking under non-stationary rotational speed, ramp-up/coast-down transients, and motor speed jitter.
 - **Hardware Setup:**
-  * Sensor: FC-03 infrared optical slot sensor connected to ESP32 GPIO 4 with hardware interrupt (RISING edge).
+  * Sensor: FC-03 infrared optical slot sensor connected to ESP32 GPIO 4 with hardware interrupt (FALLING edge matching active-low blade entry, with INPUT_PULLUP and 200 µs debounce).
   * Target: Single-slot or multi-slot optical encoder wheel mounted on the rotating motor shaft.
 - **Test Conditions:**
   1. *Steady-State Operation with Natural Jitter:* Motor running at nominal 1500 RPM with natural load fluctuations ($1\text{--}5\%$ RPM jitter).
@@ -71,7 +71,7 @@ While the entire algorithmic pipeline, firmware binary framing, serial receiver,
 ### Dataset C: Calibrated Acoustic Multi-Microphone Chamber Recordings at Known Ground-Truth Angles
 - **Objective:** Characterize physical inter-channel phase variance, validate the $+24.69\ \mu\text{s}$ inter-pair DMA delay compensation in open air, and quantify DOA angular resolution under real-world multipath and room reverberation.
 - **Hardware Setup:**
-  * Array: 4-microphone Uniform Linear Array (INMP441 MEMS microphones, inter-element spacing $d = 20.32\text{ mm}$, total aperture $60.96\text{ mm}$) streaming 4 channels @ 11,025 Hz (or 44.1 kHz) via Dual-I2S DMA (I2S0 + I2S1).
+  * Array: 4-microphone Uniform Linear Array (INMP441 MEMS microphones, inter-element spacing $d = 20.32\text{ mm}$, total aperture $60.96\text{ mm}$) streaming 4 channels @ 10,000 Hz via Dual-I2S DMA (I2S0 + I2S1).
   * Sound Source: Calibrated studio loudspeaker or reference acoustic transducer driven by an audio interface.
 - **Test Conditions:**
   * Source Test Signals: Bandpass white noise (1 kHz – 4 kHz), linear swept-sine chirps (500 Hz – 5 kHz), and recorded electric motor acoustic signatures.

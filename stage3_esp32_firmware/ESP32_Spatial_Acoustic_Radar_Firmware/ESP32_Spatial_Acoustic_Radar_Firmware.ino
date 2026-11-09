@@ -330,12 +330,14 @@ void loop() {
         // Unpack 24-bit audio in 32-bit slot:
         // INMP441 transmits 24-bit audio MSB-aligned in bits [31:8] with bits [7:0] zero-padded.
         // Shifting >> 16 maps the upper 16 MSBs directly into signed int16_t with unity digital gain,
-        // preventing peak clipping on loud acoustic transients.
+        // In I2S_CHANNEL_FMT_RIGHT_LEFT: [2*i] = Right channel (L/R->3V3), [2*i+1] = Left channel (L/R->GND)
+        // Pair A (GPIO 19): Mic 1 (Row 20, Left) is at [2*i+1]; Mic 2 (Row 28, Right) is at [2*i]
+        // Pair B (GPIO 23): Mic 3 (Row 36, Left) is at [2*i+1]; Mic 4 (Row 44, Right) is at [2*i]
         for (int i = 0; i < CHUNK_FRAMES; i++) {
-            int16_t m1 = (int16_t)(dma_rx0[2 * i] >> 16);     // Pair A Left  (Mic 1, Row 20)
-            int16_t m2 = (int16_t)(dma_rx0[2 * i + 1] >> 16); // Pair A Right (Mic 2, Row 28)
-            int16_t m3 = (int16_t)(dma_rx1[2 * i] >> 16);     // Pair B Left  (Mic 3, Row 36)
-            int16_t m4 = (int16_t)(dma_rx1[2 * i + 1] >> 16); // Pair B Right (Mic 4, Row 44)
+            int16_t m1 = (int16_t)(dma_rx0[2 * i + 1] >> 16); // Pair A Left  (Mic 1, Row 20, L/R->GND)
+            int16_t m2 = (int16_t)(dma_rx0[2 * i] >> 16);     // Pair A Right (Mic 2, Row 28, L/R->3V3)
+            int16_t m3 = (int16_t)(dma_rx1[2 * i + 1] >> 16); // Pair B Left  (Mic 3, Row 36, L/R->GND)
+            int16_t m4 = (int16_t)(dma_rx1[2 * i] >> 16);     // Pair B Right (Mic 4, Row 44, L/R->3V3)
 
             tx_audio_chunk[i].m1 = m1;
             tx_audio_chunk[i].m2 = m2;
