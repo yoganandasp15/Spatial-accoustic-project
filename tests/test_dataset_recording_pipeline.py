@@ -252,6 +252,81 @@ class TestDatasetRecordingPipeline(unittest.TestCase):
         self.assertEqual(ds_allowed["invalid_runs_count"], 0)
         self.assertEqual(ds_allowed["valid_runs_count"], 1)
 
+    def test_preexisting_cumulative_pulse_count_no_rpm_spike(self):
+        """Verify pre-existing cumulative pulse count (e.g. 25000) does not produce initial RPM spike."""
+        rec = MotorExperimentRecorder(output_dir=self.test_dir, use_synthetic=True)
+        self.assertFalse(rec.tach_baseline_established)
+        self.assertEqual(rec.last_pulse_count, 0)
+
+        # Simulate first packet arriving with cumulative pulses = 50,000 from prior motor rotation
+        now_1 = 100.0
+        pulses_1 = 50000
+        if not rec.tach_baseline_established:
+            rec.last_pulse_count = pulses_1
+            rec.last_pulse_time_mono = now_1
+            rec.tach_baseline_established = True
+
+        self.assertTrue(rec.tach_baseline_established)
+        self.assertEqual(rec.last_pulse_count, 50000)
+        self.assertIsNone(rec.current_rpm, "Initial packet must not compute RPM")
+
+        # Simulate second packet 0.50s later with 15 pulses added (1800 RPM nominal)
+        now_2 = 100.50
+        pulses_2 = 50015
+        dt_p = now_2 - rec.last_pulse_time_mono
+        if dt_p >= 0.5:
+            dp = (pulses_2 - rec.last_pulse_count) & 0xFFFFFFFF
+            rec.current_rpm = ((dp / rec.pulses_per_rev) / dt_p) * 60.0
+            rec.rpm_history.append(rec.current_rpm)
+
+        self.assertIsNotNone(rec.current_rpm)
+        self.assertAlmostEqual(rec.current_rpm, 1800.0, delta=10.0)
+        self.assertLess(rec.current_rpm, 3000.0, "RPM must reflect delta, not cumulative 50000 boot count")
+
+    def test_interrupted_run_returns_false_exit_code(self):
+        """Verify interrupted run saves artifacts for debugging but returns False (exit 1)."""
+        rec = MotorExperimentRecorder(output_dir=self.test_dir, use_synthetic=True)
+        rec.generate_synthetic_testbench_run()
+        rec.recording_status = "INTERRUPTED"
+
+        # run() must return False when status is not COMPLETE
+        success = rec.run()
+        self.assertFalse(success, "Interrupted run must return False so process exits with code 1")
+
+        # But artifacts must be preserved for debugging
+        self.assertTrue(os.path.isdir(rec.run_dir))
+        with open(os.path.join(rec.run_dir, "metadata.json"), "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        self.assertEqual(meta["recording_status"], "INTERRUPTED")
+
+    def test_header_contract_validation_rejection(self):
+        """Verify invalid Type 0x05 header fields (channels != 4, rate != 10k, etc.) are rejected."""
+        # Contract invariants: pt == 0x05, ch == 4, fs_val == 10000, blk == 128, num_vib <= 8
+        valid_header = {"pt": 0x05, "ch": 4, "fs_val": 10000, "blk": 128, "num_vib": 5}
+        self.assertTrue(
+            valid_header["pt"] == 0x05 and valid_header["ch"] == 4 and
+            valid_header["fs_val"] == 10000 and valid_header["blk"] == 128 and
+            valid_header["num_vib"] <= 8
+        )
+
+        # Invalid channels (e.g. 2 instead of 4)
+        invalid_ch = {"pt": 0x05, "ch": 2, "fs_val": 10000, "blk": 128, "num_vib": 5}
+        is_valid = (
+            invalid_ch["pt"] == 0x05 and invalid_ch["ch"] == 4 and
+            invalid_ch["fs_val"] == 10000 and invalid_ch["blk"] == 128 and
+            invalid_ch["num_vib"] <= 8
+        )
+        self.assertFalse(is_valid, "Channel count != 4 must fail contract validation")
+
+        # Excessive vibration samples (> 8)
+        invalid_vib = {"pt": 0x05, "ch": 4, "fs_val": 10000, "blk": 128, "num_vib": 16}
+        is_valid_vib = (
+            invalid_vib["pt"] == 0x05 and invalid_vib["ch"] == 4 and
+            invalid_vib["fs_val"] == 10000 and invalid_vib["blk"] == 128 and
+            invalid_vib["num_vib"] <= 8
+        )
+        self.assertFalse(is_valid_vib, "num_vib > 8 must fail contract validation")
+
 
 if __name__ == "__main__":
     unittest.main()

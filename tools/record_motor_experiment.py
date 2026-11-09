@@ -126,6 +126,7 @@ class MotorExperimentRecorder:
         self.dropped_packets = 0
         self.checksum_errors = 0
         self.last_seq: Optional[int] = None
+        self.tach_baseline_established = False
         self.last_pulse_count = 0
         self.last_pulse_time_mono = 0.0
         self.current_rpm: Optional[float] = None
@@ -226,6 +227,13 @@ class MotorExperimentRecorder:
                     pkt_type = rx_buf[2]
                     if pkt_type == 0x05:
                         s1, s2, pt, ch, seq, fs_val, blk, num_vib, res, pulses = struct.unpack_from(HEADER_FORMAT, rx_buf, 0)
+
+                        # Validate Type 0x05 Packet Contract invariants
+                        if pt != 0x05 or ch != 4 or fs_val != 10000 or blk != 128 or num_vib > 8:
+                            self.checksum_errors += 1
+                            del rx_buf[:2]
+                            continue
+
                         vib_len = num_vib * 6
                         audio_len = blk * ch * 2
                         total_len = HEADER_SIZE + vib_len + audio_len + 2
@@ -266,18 +274,24 @@ class MotorExperimentRecorder:
                                     self.dropped_packets += seq_gap
                         self.last_seq = seq
 
-                        # Tachometer & RPM calculation using monotonic interval
-                        dt_p = now_mono - self.last_pulse_time_mono
-                        if dt_p >= 0.5:
-                            dp = pulses - self.last_pulse_count
-                            if dp > 0 and dt_p > 0:
-                                self.current_rpm = ((dp / self.pulses_per_rev) / dt_p) * 60.0
-                                self.rpm_history.append(self.current_rpm)
-                            elif dp == 0:
-                                self.current_rpm = 0.0
-                                self.rpm_history.append(0.0)
+                        # Tachometer & RPM calculation using monotonic interval and baseline alignment
+                        if not self.tach_baseline_established:
                             self.last_pulse_count = pulses
                             self.last_pulse_time_mono = now_mono
+                            self.tach_baseline_established = True
+                            # Baseline established from first packet: do not compute initial RPM spike
+                        else:
+                            dt_p = now_mono - self.last_pulse_time_mono
+                            if dt_p >= 0.5:
+                                dp = (pulses - self.last_pulse_count) & 0xFFFFFFFF
+                                if dp > 0 and dp < 50000 and dt_p > 0:
+                                    self.current_rpm = ((dp / self.pulses_per_rev) / dt_p) * 60.0
+                                    self.rpm_history.append(self.current_rpm)
+                                elif dp == 0:
+                                    self.current_rpm = 0.0
+                                    self.rpm_history.append(0.0)
+                                self.last_pulse_count = pulses
+                                self.last_pulse_time_mono = now_mono
 
                         self.all_tach_pulses.append(pulses)
 
@@ -616,7 +630,7 @@ class MotorExperimentRecorder:
             "measured_rpm": mean_rpm,
             "rpm_valid": rpm_valid,
             "rpm_jitter": rpm_jitter,
-            "total_tach_pulses": max(self.all_tach_pulses) if self.all_tach_pulses else 0,
+            "total_tach_pulses": (max(self.all_tach_pulses) - min(self.all_tach_pulses)) if self.all_tach_pulses else 0,
             "mean_dyn_vib_g": mean_dyn,
             "peak_dyn_vib_g": peak_dyn,
             "order_1x_energy_pct": e1_pct,
@@ -735,14 +749,19 @@ class MotorExperimentRecorder:
 
     def run(self) -> bool:
         if not self.use_synthetic:
-            success = self.record_hardware()
-            if not success or self.recording_status == "FAILED":
+            self.record_hardware()
+            if self.recording_status == "FAILED":
                 return False
         else:
-            self.generate_synthetic_testbench_run()
+            if not self.vibration_records:
+                self.generate_synthetic_testbench_run()
 
+        # Save artifacts (preserving interrupted/incomplete state for diagnostic inspection)
         self.save_dataset_artifacts()
-        return True
+
+        # Process exit status: strictly return True (exit code 0) ONLY if recording_status == "COMPLETE"
+        # If INTERRUPTED or INCOMPLETE, files are saved for debugging, but process returns False (exit code 1)
+        return self.recording_status == "COMPLETE"
 
 
 def main():

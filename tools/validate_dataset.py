@@ -440,6 +440,12 @@ def validate_dataset(dataset_dir: str, strict: bool = False, allow_synthetic: bo
             if not run_rep["is_synthetic"]:
                 results["physical_matrix_counts"][k] += 1
 
+    # Check 2x2 Matrix completeness
+    pm = results["physical_matrix_counts"]
+    missing_physical = [cond for cond, count in pm.items() if count == 0]
+    results["matrix_complete"] = (len(missing_physical) == 0 and results["physical_runs_count"] >= 4)
+    results["missing_conditions"] = missing_physical
+
     return results
 
 
@@ -463,6 +469,8 @@ def print_validation_report(results: Dict[str, Any]):
     print(f"   [2] HEALTHY   + DISTURBANCE : {pm['healthy_disturbance']} physical / {tm['healthy_disturbance']} total")
     print(f"   [3] DEFECTIVE + QUIET       : {pm['defective_quiet']} physical / {tm['defective_quiet']} total")
     print(f"   [4] DEFECTIVE + DISTURBANCE : {pm['defective_disturbance']} physical / {tm['defective_disturbance']} total")
+    cov_str = "COMPLETE (All 4 physical cells observed)" if results.get("matrix_complete") else f"INCOMPLETE (Missing: {', '.join(results.get('missing_conditions', []))})"
+    print(f"   --> Matrix Coverage         : {cov_str}")
     print("-" * 80)
 
     # Detailed per-run breakdown
@@ -505,6 +513,8 @@ def main():
                         help="Exit with code 1 if any invalid runs, corruptions, interruptions, or synthetic data exist")
     parser.add_argument("--allow-synthetic", action="store_true",
                         help="Permit synthetic data in strict mode (for CI/unit test verification)")
+    parser.add_argument("--require-matrix", action="store_true",
+                        help="Exit with code 1 if any of the 4 physical matrix cells is missing")
 
     args = parser.parse_args()
     res = validate_dataset(args.dataset_dir, strict=args.strict, allow_synthetic=args.allow_synthetic)
@@ -526,6 +536,9 @@ def main():
             sys.exit(1)
         if not args.allow_synthetic and res["synthetic_runs_count"] > 0:
             print("[STRICT FAIL] Synthetic data present in physical dataset.")
+            sys.exit(1)
+        if args.require_matrix and not res.get("matrix_complete"):
+            print(f"[STRICT FAIL] Incomplete 2x2 matrix: missing {res.get('missing_conditions')}")
             sys.exit(1)
 
 
