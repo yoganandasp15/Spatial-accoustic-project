@@ -1,0 +1,16 @@
+{
+  "mode": "defective",
+  "duration_s": 10.0,
+  "total_samples": 4000,
+  "sample_rate_vib_hz": 400.0,
+  "sample_rate_audio_hz": 10000.0,
+  "mean_rpm": 1764.9,
+  "rpm_jitter": 9.0,
+  "mean_dyn_vib_g": 0.4236,
+  "peak_dyn_vib_g": 0.5525,
+  "iso_zone": "Zone C: Warning",
+  "order_1x_energy_pct": 4.3,
+  "order_2x_energy_pct": 2.1,
+  "csv_path": "C:\\Users\\Yogi\\Downloads\\Spatial-accoustic-project\\data\\experiments\\motor_defective_run.csv",
+  "wav_path": "C:\\Users\\Yogi\\Downloads\\Spatial-accoustic-project\\data\\experiments\\motor_defective_run_audio.wav"
+}

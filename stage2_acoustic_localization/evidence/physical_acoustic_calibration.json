@@ -1,0 +1,45 @@
+{
+  "array": "4-Mic INMP441 Linear Array",
+  "pitch_mm": 20.32,
+  "span_mm": 60.96,
+  "mean_error_deg": 0.0,
+  "median_error_deg": 0.0,
+  "max_error_deg": 0.0,
+  "tested_angles": [
+    {
+      "true_deg": 0.0,
+      "measured_deg": 0.0,
+      "error_deg": 0.0,
+      "prominence": 1.93,
+      "dominant_side": "CENTER"
+    },
+    {
+      "true_deg": 30.0,
+      "measured_deg": 30.0,
+      "error_deg": 0.0,
+      "prominence": 1.63,
+      "dominant_side": "RIGHT"
+    },
+    {
+      "true_deg": -30.0,
+      "measured_deg": -30.0,
+      "error_deg": 0.0,
+      "prominence": 1.63,
+      "dominant_side": "LEFT"
+    },
+    {
+      "true_deg": 45.0,
+      "measured_deg": 45.0,
+      "error_deg": 0.0,
+      "prominence": 1.43,
+      "dominant_side": "RIGHT"
+    },
+    {
+      "true_deg": -45.0,
+      "measured_deg": -45.0,
+      "error_deg": 0.0,
+      "prominence": 1.43,
+      "dominant_side": "LEFT"
+    }
+  ]
+}

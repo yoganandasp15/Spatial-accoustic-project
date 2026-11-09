@@ -35,7 +35,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import sounddevice as sd
 from matplotlib.animation import FuncAnimation
+from matplotlib.colors import LinearSegmentedColormap
 from scipy import signal
+from scipy.ndimage import gaussian_filter
 from scipy.fft import irfft, rfft
 from scipy.signal import welch
 from scipy.stats import kurtosis
@@ -62,6 +64,12 @@ GRID_Y = 45
 # Acoustic Filter Bounds (Hz) - DC Motor & Voice Bandwidth (Rejects DC drift & sub-rumble)
 FREQ_MIN = 80.0
 FREQ_MAX = 5500.0
+
+# Fixed palette: blue/cyan/green/yellow/orange/red. Relative digital level, not dB SPL.
+ACOUSTIC_HEAT_CMAP = LinearSegmentedColormap.from_list(
+    "acoustic_thermal",
+    ["#050914", "#123e91", "#08b9d2", "#18c979", "#e5d83b", "#ff9226", "#ff2424"], N=256
+)
 
 # Frame & Animation Timing
 UPDATE_INTERVAL_MS = 50     # 20 FPS GUI refresh
@@ -206,6 +214,14 @@ class AcousticActivityDetector:
         self.calib_samples.clear()
         self.is_calibrating = True
 
+    def note_coherent_source(self, current_time: float):
+        """Recover when SRP proves a coherent source was present during startup."""
+        self.is_calibrating = False
+        self.calib_samples.clear()
+        self.noise_floor = min(max(0.0008, self.noise_floor), 0.0030)
+        self.min_active_threshold = max(0.0025, self.noise_floor * 1.60)
+        self.last_active_time = current_time
+
     def process_frame(self, avg_rms: float, current_time: float) -> Tuple[bool, float, float]:
         """
         Evaluates incoming audio frame energy against dynamic Schmitt thresholds.
@@ -218,8 +234,9 @@ class AcousticActivityDetector:
         if self.is_calibrating:
             self.calib_samples.append(avg_rms)
             if len(self.calib_samples) >= self.calib_frames:
-                self.noise_floor = max(0.0010, float(np.median(self.calib_samples)))
-                self.min_active_threshold = max(0.0030, self.noise_floor * 1.50)
+                # Lower quantile is less sensitive to brief target sound during startup.
+                self.noise_floor = max(0.0008, float(np.percentile(self.calib_samples, 20)))
+                self.min_active_threshold = max(0.0025, self.noise_floor * 1.60)
                 self.is_calibrating = False
 
         # Phase 2: Dual-threshold Schmitt Trigger with Hangover
@@ -538,7 +555,7 @@ class SRPPhatEngine:
                     "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
                     "dom_side": "NONE", "is_valid": False, "active_pairs": 0,
                     "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status,
-                    "spatial_rho": 0.0
+                    "spatial_rho": 0.0, "status": "BELOW_ENERGY_GATE"
                 }
             )
 
@@ -558,7 +575,7 @@ class SRPPhatEngine:
                     "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
                     "dom_side": "NONE", "is_valid": False, "active_pairs": 0,
                     "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status,
-                    "spatial_rho": max_spatial_rho
+                    "spatial_rho": max_spatial_rho, "status": "LOW_SPATIAL_COHERENCE"
                 }
             )
 
@@ -613,7 +630,7 @@ class SRPPhatEngine:
                     "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
                     "dom_side": "NONE", "is_valid": False, "active_pairs": valid_pairs_count,
                     "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status,
-                    "spatial_rho": max_spatial_rho
+                    "spatial_rho": max_spatial_rho, "status": "NO_VALID_GCC_PAIRS"
                 }
             )
 
@@ -637,7 +654,7 @@ class SRPPhatEngine:
                     "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
                     "dom_side": "NONE", "is_valid": False, "active_pairs": valid_pairs_count,
                     "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status,
-                    "spatial_rho": max_spatial_rho
+                    "spatial_rho": max_spatial_rho, "status": "LOW_ANGULAR_CONTRAST"
                 }
             )
 
@@ -655,7 +672,7 @@ class SRPPhatEngine:
                     "pct_left": 33.3, "pct_center": 33.3, "pct_right": 33.3,
                     "dom_side": "NONE", "is_valid": False, "active_pairs": valid_pairs_count,
                     "avg_rms": avg_rms, "ch_rms": ch_rms, "ch_status": ch_status,
-                    "spatial_rho": max_spatial_rho
+                    "spatial_rho": max_spatial_rho, "status": "PAIR_ANGLE_DISAGREEMENT"
                 }
             )
 
@@ -692,7 +709,9 @@ class SRPPhatEngine:
             "active_pairs": valid_pairs_count,
             "avg_rms": avg_rms,
             "ch_rms": ch_rms,
-            "ch_status": ch_status
+            "ch_status": ch_status,
+            "spatial_rho": max_spatial_rho,
+            "status": "LOCALIZED"
         }
 
         return best_bearing_deg, composite_prom, angles_deg, srp_norm, raw_2d_heatmap, side_metrics
@@ -710,41 +729,37 @@ class SRPPhatEngine:
 
     @classmethod
     def compute_true_2d_acoustic_heatmap(
-        cls,
-        raw_2d_heatmap: np.ndarray,
-        target_range_m: float,
-        avg_rms: float,
-        is_locked: bool,
-        geometry: ArrayGeometry
+        cls, raw_2d_heatmap: np.ndarray, target_range_m: float, avg_rms: float,
+        is_locked: bool, geometry: ArrayGeometry, noise_floor: float = 0.0030
     ) -> np.ndarray:
+        """Fixed monotonic thermal intensity from SRP shape and RMS above ambient.
+
+        Relative digital level, not calibrated dB SPL. A 1D ULA measures bearing,
+        not source range; radial weighting is only for display.
         """
-        Transforms raw SRP cross-correlation backprojection into dynamic radiometric acoustic camera thermal imagery:
-        - Near-field spherical divergence weighting
-        - Non-linear thermal contrast enhancement
-        - Live acoustic energy modulation (quiet room = cold dark floor; speech = vibrant thermal bloom)
-        """
+        raw = np.asarray(raw_2d_heatmap, dtype=np.float64)
+        raw = np.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)
+        spatial = np.maximum(raw, 0.0)
+        peak = float(np.max(spatial)) if spatial.size else 0.0
+        if peak <= 1e-12:
+            return np.zeros_like(raw, dtype=np.float64)
+        # Normalize spatial shape only; never normalize final intensity per frame.
+        spatial /= peak
+        spatial = gaussian_filter(spatial, sigma=1.15, mode="nearest")
+        spatial_peak = float(np.max(spatial))
+        if spatial_peak <= 1e-12:
+            return np.zeros_like(raw, dtype=np.float64)
+        spatial /= spatial_peak
         r_grid = np.sqrt(geometry.xx ** 2 + geometry.yy ** 2)
         dist_weight = 1.0 / np.sqrt(np.maximum(r_grid, 0.40))
-        dist_weight /= np.max(dist_weight)
-
-        # Removed artificial radial focal ring (nominal_range = 1.25m prior).
-        # Linear array naturally constrains azimuth bearing theta;
-        # radial dimension reflects true backprojected energy with spherical divergence weighting.
-        spatial_filter = dist_weight
-
-        filtered_heat = raw_2d_heatmap * spatial_filter
-        max_heat = np.max(filtered_heat)
-        if max_heat > 1e-9:
-            norm_heat = filtered_heat / max_heat
-            # High-contrast thermal radiation curve (FLIR style)
-            thermal_heat = norm_heat ** 2.2
-        else:
-            thermal_heat = np.zeros_like(raw_2d_heatmap)
-
-        # Modulate thermal glow by live signal RMS energy
-        rms_gain = np.clip((avg_rms - 0.003) / 0.12, 0.05, 1.0) if avg_rms > 0.003 else 0.02
-        acoustic_heat = thermal_heat * rms_gain
-        return np.clip(acoustic_heat, 0.0, 1.0)
+        dist_weight /= max(float(np.max(dist_weight)), 1e-12)
+        spatial *= dist_weight
+        spatial /= max(float(np.max(spatial)), 1e-12)
+        # Fixed monotonic 1.5–16 dB-above-ambient digital scale.
+        floor = max(float(noise_floor), 0.0008)
+        level_db = 20.0 * math.log10(max(float(avg_rms), 1e-9) / floor)
+        level = float(np.clip((level_db - 1.5) / 14.5, 0.0, 1.0))
+        return np.clip(np.power(np.clip(spatial, 0.0, 1.0), 1.35) * level, 0.0, 1.0)
 
     @classmethod
     def synthesize_directional_map(
@@ -1086,16 +1101,22 @@ class MultimodalMotorEngine:
         # Acoustic spectrum for high-frequency acoustic baseline comparison
         spec = np.abs(np.fft.rfft(x))
 
-        # 3. Fault Classification Diagnostics
+        # 3. Fault Classification Diagnostics (Multimodal Edge-AI Decision Rules)
         fault_label = "NOMINAL / SMOOTH OPERATION"
-        if dyn_g > 0.40 and e_1x > 0.12:
+        is_acoustic_elevated = bool(rms > 0.025 or kurt > 4.2 or crest > 4.2)
+        is_vib_elevated = bool(dyn_g > 0.25)
+
+        if is_vib_elevated and dyn_g > 0.40 and e_1x > 0.12:
             fault_label = "MASS UNBALANCE (Strong 1x RPM Vibration)"
-        elif dyn_g > 0.30 and e_2x > 0.10:
+        elif is_vib_elevated and dyn_g > 0.30 and e_2x > 0.10:
             fault_label = "SHAFT MISALIGNMENT / BENT (Strong 2x RPM)"
-        elif crest > 4.5 and kurt > 4.5:
+        elif is_vib_elevated and crest > 4.5 and kurt > 4.5:
             fault_label = "BEARING IMPACT / BRUSH ARCING (High Kurtosis)"
-        elif dyn_g > 0.35:
+        elif is_vib_elevated and dyn_g > 0.35:
             fault_label = "ELEVATED MECHANICAL VIBRATION (ISO Zone C Alert)"
+        elif is_acoustic_elevated and not is_vib_elevated:
+            # Core Minor Project Principle (PDF Page 13): Acoustic Disturbance != Mechanical Fault
+            fault_label = "ACOUSTIC DISTURBANCE DETECTED (Vibration Nominal -> Non-Mechanical)"
         elif rms > 0.035 and kurt < 2.5:
             fault_label = "COMMUTATOR NOISE / MECHANICAL DRAG"
 
@@ -1135,6 +1156,9 @@ class MultimodalMotorEngine:
 
         # 5. Composite Motor Health Score (0 - 100%)
         total_penalty = vib_penalty + max(0.0, (kurt - 3.0) * 3.0) + delta_penalty
+        if is_acoustic_elevated and not is_vib_elevated:
+            # External environmental acoustic noise must not degrade mechanical motor health rating
+            total_penalty = min(total_penalty, 5.0)
         health_score = max(5.0, min(100.0, 100.0 - total_penalty))
 
         return {
@@ -1964,12 +1988,12 @@ class AcousticRadarApp:
             extent=[X_MIN, X_MAX, Y_MIN, Y_MAX],
             aspect="auto",
             vmin=0.0, vmax=1.0,
-            cmap="inferno",
+            cmap=ACOUSTIC_HEAT_CMAP,
             interpolation="bicubic"
         )
 
         self.cb = self.fig.colorbar(self.im_heat, ax=self.ax_map, fraction=0.046, pad=0.04)
-        self.cb.set_label("Live Acoustic Intensity (SRP-PHAT Relative Power)", color="#b8c2d1", fontsize=10)
+        self.cb.set_label("Relative acoustic level above ambient (not dB SPL)", color="#b8c2d1", fontsize=10)
         self.cb.ax.tick_params(colors="#b8c2d1", labelsize=9)
 
         # Dynamic Side Intensity Indicators (Left & Right Flank VU Rails)
@@ -2291,16 +2315,24 @@ class AcousticRadarApp:
             avg_rms = float(np.mean(rms_per_ch)) if rms_per_ch else 0.0
             now = time.time()
 
-            # Process frame through production Schmitt-Trigger VAD with frozen adaptation
+            # RMS VAD gives ambient status, but a contaminated startup baseline must not
+            # veto SRP's independent spatial-coherence and GCC-PHAT source validation.
             is_active_sound, self.noise_floor, attack_thresh = self.vad.process_frame(avg_rms, now)
 
-            # 2. Multi-Pair Steered Response Power & 2D Backprojection
-            min_srp_rms = max(0.0020, self.noise_floor * 1.20)
+            min_srp_rms = 0.0020
             best_bearing, composite_prom, srp_angles, srp_norm, raw_2d_heatmap, side_metrics = (
                 SRPPhatEngine.compute_srp_frame(raw_frame, fs, self.geometry, min_active_rms=min_srp_rms)
             )
 
-            is_source_valid = bool(is_active_sound and side_metrics.get("is_valid", False))
+            is_audio_energy_present = bool(avg_rms >= min_srp_rms)
+            is_source_valid = bool(side_metrics.get("is_valid", False))
+            if is_source_valid:
+                self.vad.note_coherent_source(now)
+                self.noise_floor = self.vad.noise_floor
+                is_active_sound = True
+            else:
+                # Energy is present, but do not invent a bearing or hotspot.
+                is_active_sound = bool(is_active_sound or is_audio_energy_present)
 
             # 3. Dynamic Target Tracker
             target_angle, target_range, confidence, is_locked = self.tracker.update(
@@ -2314,7 +2346,7 @@ class AcousticRadarApp:
             # 4. True 2D Acoustic Camera Thermal Heatmap (Real Backprojected Energy)
             if is_source_valid:
                 acoustic_heat = SRPPhatEngine.compute_true_2d_acoustic_heatmap(
-                    raw_2d_heatmap, target_range, avg_rms, is_locked, self.geometry
+                    raw_2d_heatmap, target_range, avg_rms, is_locked, self.geometry, self.noise_floor
                 )
                 self.smoothed_heatmap = (
                     HEATMAP_SMOOTH_ALPHA * self.smoothed_heatmap
@@ -2395,7 +2427,11 @@ class AcousticRadarApp:
             self.right_gauge_text.set_text(f"RIGHT ►\n{pct_r:.0f}%" if is_source_valid else "RIGHT ►\nIDLE")
 
             # Incoming Sector HUD Banner
-            if not is_source_valid:
+            if not is_source_valid and is_active_sound:
+                reject_reason = str(side_metrics.get("status", "SPATIAL GATE"))
+                self.sector_banner_text.set_text(f"■ SOUND PRESENT — BEARING UNRESOLVED ({reject_reason}) ■")
+                self.sector_banner_text.set_color("#ffaa00")
+            elif not is_source_valid:
                 self.sector_banner_text.set_text("■ AMBIENT MONITORING — READY FOR TARGET SOUND ■")
                 self.sector_banner_text.set_color("#6b7d99")
             elif dom_s == "LEFT":

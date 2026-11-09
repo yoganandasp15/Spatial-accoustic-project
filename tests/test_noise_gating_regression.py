@@ -301,5 +301,33 @@ class TestNoiseGatingRegression(unittest.TestCase):
         )
 
 
+    def test_09_coherent_source_recovers_from_contaminated_startup_calibration(self):
+        """A coherent source must not remain masked by startup ambient calibration."""
+        vad = AcousticActivityDetector(min_active_threshold=0.0035, calib_frames=25, hangover_sec=0.350)
+        dt = self.frame_len / self.fs
+        now = 1000.0
+        for _ in range(25):
+            now += dt
+            vad.process_frame(0.0060, now)
+        self.assertFalse(vad.is_calibrating)
+        self.assertGreater(vad.noise_floor, 0.0050)
+        now += dt
+        vad.note_coherent_source(now)
+        self.assertLessEqual(vad.noise_floor, 0.0030)
+        active, _, _ = vad.process_frame(0.0050, now + dt)
+        self.assertTrue(active)
+
+    def test_10_heatmap_intensity_is_monotonic_and_silence_is_black(self):
+        """Production heatmap brightens with RMS and returns zero for silence."""
+        xx, yy = self.geometry.xx, self.geometry.yy
+        raw = np.exp(-(((xx - 0.30) / 0.35) ** 2 + ((yy - 1.60) / 0.45) ** 2))
+        quiet = SRPPhatEngine.compute_true_2d_acoustic_heatmap(raw, 1.25, 0.0040, True, self.geometry, noise_floor=0.0030)
+        loud = SRPPhatEngine.compute_true_2d_acoustic_heatmap(raw, 1.25, 0.0200, True, self.geometry, noise_floor=0.0030)
+        silent = SRPPhatEngine.compute_true_2d_acoustic_heatmap(np.zeros_like(raw), 1.25, 0.0200, True, self.geometry, noise_floor=0.0030)
+        self.assertTrue(np.all(np.isfinite(quiet)))
+        self.assertTrue(np.all(np.isfinite(loud)))
+        self.assertGreater(float(np.max(loud)), float(np.max(quiet)))
+        self.assertEqual(float(np.max(silent)), 0.0)
+
 if __name__ == "__main__":
     unittest.main()
