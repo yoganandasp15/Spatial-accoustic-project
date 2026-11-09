@@ -1175,6 +1175,7 @@ class MultimodalMotorEngine:
             "primary_fault": fault_label,
             "e_1x_pct": e_1x * 100.0,
             "e_2x_pct": e_2x * 100.0,
+            "e_3x_pct": e_3x * 100.0,
             "baseline_locked": self.baseline_locked,
             "delta": delta_info
         }
@@ -1930,10 +1931,26 @@ class AcousticRadarApp:
         self.pulses_per_rev_idx = 0
         self.pulses_per_rev = 1
 
+        # Interactive Motor Demo / Test Profiles (Key 'T' to cycle)
+        self.demo_profile_idx = 0
+        self.demo_profiles = [
+            "LIVE_HARDWARE",
+            "DEMO_HEALTHY_1800RPM",
+            "DEMO_UNBALANCE_1X",
+            "DEMO_MISALIGNMENT_2X",
+            "DEMO_DISTURBANCE_PROOF"
+        ]
+        self.demo_phase = 0.0
+        self.demo_pulses = 120
+        self._last_seen_pulses = -1
+        self._last_pulse_blink_time = 0.0
+
         self._setup_ui()
 
     def _get_evidence_mode_tag(self) -> str:
         """Returns clear evidence mode tag distinguishing physical hardware from simulation."""
+        if getattr(self, "demo_profile_idx", 0) > 0:
+            return f"DEMO INJECTION: {self.demo_profiles[self.demo_profile_idx]} (Key 'T' to revert to live)"
         if self.active_source_type == "ESP32":
             telemetry = self.current_source.get_multimodal_telemetry()
             is_alive = telemetry.get("is_hardware_alive", False)
@@ -1959,7 +1976,7 @@ class AcousticRadarApp:
 
     def _setup_ui(self):
         plt.style.use("dark_background")
-        self.fig = plt.figure(figsize=(17, 9.5), facecolor="#0a0e17")
+        self.fig = plt.figure(figsize=(19, 10), facecolor="#0a0e17")
 
         try:
             if hasattr(self.fig.canvas, "manager") and self.fig.canvas.manager:
@@ -1969,13 +1986,17 @@ class AcousticRadarApp:
         except Exception:
             pass
 
-        # 2 rows x 3 columns layout
+        # 2 rows x 4 columns balanced layout
+        # Col 0: 2D Acoustic Camera (Spatial Localization)
+        # Col 1: Polar Bearing Radar (Top) + Live 4-Mic Waveforms (Bottom)
+        # Col 2: Multi-Pair SRP Spectrum (Top) + Live ADXL345 3-Axis Vibration Scope (Bottom)
+        # Col 3: Rotational Orders & Tachometer (Top) + Multimodal Motor Health HUD (Bottom)
         gs = gridspec.GridSpec(
-            2, 3,
-            width_ratios=[1.25, 0.95, 0.95],
+            2, 4,
+            width_ratios=[1.15, 0.90, 0.95, 1.05],
             height_ratios=[1.0, 1.0],
             hspace=0.28, wspace=0.22,
-            left=0.04, right=0.98, top=0.93, bottom=0.05
+            left=0.035, right=0.985, top=0.93, bottom=0.05
         )
 
         # ---------------------------------------------------------------------
@@ -2087,7 +2108,7 @@ class AcousticRadarApp:
         self.ax_map.grid(alpha=0.15, color="#34496d")
 
         # ---------------------------------------------------------------------
-        # 2. Polar Radar Sweep (Top Middle: gs[0, 1])
+        # 2. Polar Radar Sweep (Col 1 Top: gs[0, 1])
         # ---------------------------------------------------------------------
         self.ax_radar = self.fig.add_subplot(gs[0, 1], projection="polar", facecolor="#101726")
         self.radar_angles = np.deg2rad(np.linspace(-90, 90, 181))
@@ -2106,22 +2127,7 @@ class AcousticRadarApp:
         self.ax_radar.legend(loc="lower right", facecolor="#101726", edgecolor="#2a3b5c", fontsize=7)
 
         # ---------------------------------------------------------------------
-        # 3. SRP-PHAT Delay Profile & Angular Spectrum (Top Right: gs[0, 2])
-        # ---------------------------------------------------------------------
-        self.ax_srp = self.fig.add_subplot(gs[0, 2], facecolor="#101726")
-        self.srp_line, = self.ax_srp.plot([], [], color="#00ffcc", linewidth=2.0, label="SRP-PHAT (6 Pairs)")
-        self.srp_peak_marker, = self.ax_srp.plot([], [], color="#ff0055", marker="o", markersize=8, label="Estimated DOA")
-        self.ax_srp.set_xlim(-90, 90)
-        self.ax_srp.set_ylim(-0.05, 1.15)
-        self.ax_srp.set_title("MULTI-PAIR STEERED RESPONSE POWER", color="#ffffff", fontsize=11, weight="bold")
-        self.ax_srp.set_xlabel("Bearing Angle (deg)", color="#b8c2d1", fontsize=9)
-        self.ax_srp.set_ylabel("Normalized SRP Power", color="#b8c2d1", fontsize=9)
-        self.ax_srp.tick_params(colors="#b8c2d1", labelsize=8)
-        self.ax_srp.grid(alpha=0.15, color="#34496d")
-        self.ax_srp.legend(loc="upper right", facecolor="#101726", edgecolor="#2a3b5c", fontsize=7)
-
-        # ---------------------------------------------------------------------
-        # 4. ALL 4 MICROPHONE LIVE INPUTS (Bottom Middle: gs[1, 1])
+        # 3. ALL 4 MICROPHONE LIVE INPUTS (Col 1 Bottom: gs[1, 1])
         # ---------------------------------------------------------------------
         self.ax_mics = self.fig.add_subplot(gs[1, 1], facecolor="#0e1420")
         self.mic_colors = ["#00ffcc", "#ffaa00", "#ff0077", "#33ccff"] # M1, M2, M3, M4
@@ -2159,13 +2165,103 @@ class AcousticRadarApp:
             self.vu_texts.append(txt)
 
         # ---------------------------------------------------------------------
-        # 5. Multimodal Telemetry & Diagnostics HUD (Bottom Right: gs[1, 2])
+        # 4. SRP-PHAT Delay Profile & Angular Spectrum (Col 2 Top: gs[0, 2])
         # ---------------------------------------------------------------------
-        self.ax_telemetry = self.fig.add_subplot(gs[1, 2], facecolor="#0e1420")
+        self.ax_srp = self.fig.add_subplot(gs[0, 2], facecolor="#101726")
+        self.srp_line, = self.ax_srp.plot([], [], color="#00ffcc", linewidth=2.0, label="SRP-PHAT (6 Pairs)")
+        self.srp_peak_marker, = self.ax_srp.plot([], [], color="#ff0055", marker="o", markersize=8, label="Estimated DOA")
+        self.ax_srp.set_xlim(-90, 90)
+        self.ax_srp.set_ylim(-0.05, 1.15)
+        self.ax_srp.set_title("MULTI-PAIR STEERED RESPONSE POWER", color="#ffffff", fontsize=11, weight="bold")
+        self.ax_srp.set_xlabel("Bearing Angle (deg)", color="#b8c2d1", fontsize=9)
+        self.ax_srp.set_ylabel("Normalized SRP Power", color="#b8c2d1", fontsize=9)
+        self.ax_srp.tick_params(colors="#b8c2d1", labelsize=8)
+        self.ax_srp.grid(alpha=0.15, color="#34496d")
+        self.ax_srp.legend(loc="upper right", facecolor="#101726", edgecolor="#2a3b5c", fontsize=7)
+
+        # ---------------------------------------------------------------------
+        # 5. LIVE ADXL345 3-AXIS VIBRATION SCOPE (Col 2 Bottom: gs[1, 2])
+        # ---------------------------------------------------------------------
+        self.ax_vib = self.fig.add_subplot(gs[1, 2], facecolor="#0e1420")
+        self.vib_line_x, = self.ax_vib.plot([], [], color="#ff9226", linewidth=1.1, label="a_x (X-Axis)")
+        self.vib_line_y, = self.ax_vib.plot([], [], color="#38bdf8", linewidth=1.1, label="a_y (Y-Axis)")
+        self.vib_line_z, = self.ax_vib.plot([], [], color="#e879f9", linewidth=1.1, label="a_z (Z-Axis)")
+        self.vib_line_dyn, = self.ax_vib.plot([], [], color="#00ffcc", linewidth=2.0, label="a_dyn (Dynamic RMS)")
+
+        # ISO 10816 Dynamic Severity Zones (Guidelines)
+        self.ax_vib.axhline(0.15, color="#00ffcc", linestyle="--", alpha=0.45, linewidth=0.9)
+        self.ax_vib.axhline(0.35, color="#38bdf8", linestyle="--", alpha=0.45, linewidth=0.9)
+        self.ax_vib.axhline(0.70, color="#f59e0b", linestyle="--", alpha=0.45, linewidth=0.9)
+
+        self.ax_vib.text(250, 0.16, "Zone A: Good (0.15g)", color="#00ffcc", fontsize=7.5, va="bottom", ha="right", alpha=0.85)
+        self.ax_vib.text(250, 0.36, "Zone B: Perm (0.35g)", color="#38bdf8", fontsize=7.5, va="bottom", ha="right", alpha=0.85)
+        self.ax_vib.text(250, 0.71, "Zone C: Warn (0.70g)", color="#f59e0b", fontsize=7.5, va="bottom", ha="right", alpha=0.85)
+
+        self.ax_vib.set_xlim(0, 256)
+        self.ax_vib.set_ylim(-1.25, 1.25)
+        self.ax_vib.set_title("LIVE ADXL345 3-AXIS VIBRATION SCOPE (400 Hz)", color="#ffffff", fontsize=11, weight="bold")
+        self.ax_vib.set_xlabel("Vibration FIFO Samples (400 Hz ODR)", color="#b8c2d1", fontsize=9)
+        self.ax_vib.set_ylabel("Acceleration (g)", color="#b8c2d1", fontsize=9)
+        self.ax_vib.tick_params(colors="#b8c2d1", labelsize=8)
+        self.ax_vib.grid(alpha=0.15, color="#34496d")
+        self.ax_vib.legend(loc="upper left", facecolor="#101726", edgecolor="#2a3b5c", fontsize=7, ncol=2)
+
+        self.vib_badge_text = self.ax_vib.text(
+            0.98, 0.05, "a_dyn: 0.000g | ISO Vel: 0.00 mm/s",
+            transform=self.ax_vib.transAxes,
+            color="#00ffcc", fontsize=8.0, family="monospace", ha="right", va="bottom",
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="#101726", edgecolor="#00ffcc", alpha=0.85)
+        )
+
+        # ---------------------------------------------------------------------
+        # 6. ROTATIONAL ORDER SPECTRUM & TACHOMETER (Col 3 Top: gs[0, 3])
+        # ---------------------------------------------------------------------
+        self.ax_order = self.fig.add_subplot(gs[0, 3], facecolor="#0e1420")
+
+        # Digital Speedometer Readout
+        self.speedometer_text = self.ax_order.text(
+            0.50, 0.88, "SPEED: 0.0 RPM (f0 = 0.0 Hz)",
+            transform=self.ax_order.transAxes,
+            ha="center", va="center", color="#00ffcc", fontsize=11, fontweight="bold", family="monospace",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="#141f33", edgecolor="#00ffcc", linewidth=1.5)
+        )
+
+        # FC-03 Pulse Blinker LED
+        self.tach_indicator_text = self.ax_order.text(
+            0.50, 0.72, "○ FC-03 TACH: READY (0 Pulses)",
+            transform=self.ax_order.transAxes,
+            ha="center", va="center", color="#8da2c0", fontsize=8.5, fontweight="bold", family="monospace"
+        )
+
+        # Rotational Harmonic Order Bar Chart (1X, 2X, 3X)
+        bar_x = [0, 1, 2]
+        self.order_bars = self.ax_order.bar(
+            bar_x, [0.0, 0.0, 0.0],
+            width=0.55,
+            color=["#00ffcc", "#38bdf8", "#e879f9"],
+            edgecolor="#ffffff", linewidth=1.0, zorder=3
+        )
+        self.ax_order.set_xticks(bar_x)
+        self.ax_order.set_xticklabels(["1X (Unbal)", "2X (Misalign)", "3X (Harmonic)"], fontsize=8.5, color="#b8c2d1", fontweight="bold")
+        self.ax_order.set_ylim(0, 100)
+        self.ax_order.set_ylabel("Rotational Energy (%)", color="#b8c2d1", fontsize=9)
+        self.ax_order.set_title("ROTATIONAL ORDER SPECTRUM & TACHOMETER", color="#ffffff", fontsize=11, weight="bold")
+        self.ax_order.tick_params(colors="#b8c2d1", labelsize=8)
+        self.ax_order.grid(alpha=0.15, color="#34496d", axis="y")
+
+        self.bar_labels = [
+            self.ax_order.text(i, 3.0, "0.0%", ha="center", va="bottom", fontsize=8.5, fontweight="bold", color="#ffffff")
+            for i in range(3)
+        ]
+
+        # ---------------------------------------------------------------------
+        # 7. MULTIMODAL MOTOR HEALTH & DIAGNOSTIC HUD (Col 3 Bottom: gs[1, 3])
+        # ---------------------------------------------------------------------
+        self.ax_telemetry = self.fig.add_subplot(gs[1, 3], facecolor="#0e1420")
         self.ax_telemetry.axis("off")
         self.hud_text = self.ax_telemetry.text(
             0.02, 0.98, "Acquiring Multimodal Telemetry...",
-            va="top", ha="left", color="#e0e6ed", fontsize=8.0, family="monospace", linespacing=1.12
+            va="top", ha="left", color="#e0e6ed", fontsize=7.6, family="monospace", linespacing=1.08
         )
 
         # Main Title Banner
@@ -2186,6 +2282,10 @@ class AcousticRadarApp:
             self.invert_channels = not self.invert_channels
             state = "INVERTED (M4..M1)" if self.invert_channels else "NORMAL (M1..M4)"
             print(f"[+] Channel Polarity Swapped: {state}")
+        elif event.key in ("t", "T"):
+            self.demo_profile_idx = (self.demo_profile_idx + 1) % len(self.demo_profiles)
+            p_name = self.demo_profiles[self.demo_profile_idx]
+            print(f"[+] Motor Test Profile Cycled: {p_name} ({self.demo_profile_idx}/{len(self.demo_profiles)-1})")
         elif event.key in ("b", "B"):
             self.learn_baseline_requested = True
             print("[+] Motor Golden Baseline Capture Triggered! Learning reference signature...")
@@ -2263,15 +2363,20 @@ class AcousticRadarApp:
         self.fig.canvas.draw_idle()
 
     def update(self, _frame):
+        all_artists = [
+            self.im_heat, self.marker_source, self.target_line,
+            self.radar_line, self.radar_needle, self.meas_needle,
+            self.srp_line, self.srp_peak_marker, self.hud_text,
+            self.left_gauge_bg, self.left_gauge_fill, self.left_gauge_text,
+            self.right_gauge_bg, self.right_gauge_fill, self.right_gauge_text,
+            self.sector_banner_text,
+            self.vib_line_x, self.vib_line_y, self.vib_line_z, self.vib_line_dyn,
+            self.vib_badge_text,
+            self.speedometer_text, self.tach_indicator_text
+        ] + list(self.order_bars) + self.bar_labels + self.wave_lines + self.vu_texts
+
         if self.paused:
-            return [
-                self.im_heat, self.marker_source, self.target_line,
-                self.radar_line, self.radar_needle, self.meas_needle,
-                self.srp_line, self.srp_peak_marker, self.hud_text,
-                self.left_gauge_bg, self.left_gauge_fill, self.left_gauge_text,
-                self.right_gauge_bg, self.right_gauge_fill, self.right_gauge_text,
-                self.sector_banner_text
-            ] + self.wave_lines + self.vu_texts
+            return all_artists
 
         try:
             raw_frame = self.current_source.get_frame()
@@ -2485,6 +2590,58 @@ class AcousticRadarApp:
             hw_alive = bool(telemetry.get("is_hardware_alive", False))
 
             vib_hist = self.current_source.get_vibration_history(max_samples=512)
+
+            # Interactive Demo / Benchmark Injection (Key 'T' to cycle)
+            if self.demo_profile_idx > 0:
+                self.demo_phase += 0.06
+                t_now = time.time()
+                demo_name = self.demo_profiles[self.demo_profile_idx]
+                n_sim_vib = 128
+                t_sim_arr = np.linspace(t_now - n_sim_vib / 400.0, t_now, n_sim_vib)
+
+                if demo_name == "DEMO_HEALTHY_1800RPM":
+                    rpm = 1800.0 + 8.0 * math.sin(self.demo_phase * 2.0)
+                    self.demo_pulses += 1
+                    pulses = self.demo_pulses
+                    f_shaft = rpm / 60.0
+                    ax_arr = 0.045 * np.sin(2.0 * np.pi * f_shaft * t_sim_arr) + 0.008 * np.random.randn(n_sim_vib)
+                    ay_arr = 0.055 * np.cos(2.0 * np.pi * f_shaft * t_sim_arr) + 0.008 * np.random.randn(n_sim_vib)
+                    az_arr = -0.82 + 0.025 * np.sin(4.0 * np.pi * f_shaft * t_sim_arr) + 0.008 * np.random.randn(n_sim_vib)
+                    vib_hist = (t_sim_arr, ax_arr.astype(np.float32), ay_arr.astype(np.float32), az_arr.astype(np.float32))
+                    ax_g, ay_g, az_g = float(ax_arr[-1]), float(ay_arr[-1]), float(az_arr[-1])
+                elif demo_name == "DEMO_UNBALANCE_1X":
+                    rpm = 1765.0 + 15.0 * math.sin(self.demo_phase * 2.5)
+                    self.demo_pulses += 1
+                    pulses = self.demo_pulses
+                    f_shaft = rpm / 60.0
+                    ax_arr = 0.380 * np.sin(2.0 * np.pi * f_shaft * t_sim_arr) + 0.025 * np.random.randn(n_sim_vib)
+                    ay_arr = 0.420 * np.cos(2.0 * np.pi * f_shaft * t_sim_arr) + 0.025 * np.random.randn(n_sim_vib)
+                    az_arr = -0.82 + 0.110 * np.sin(4.0 * np.pi * f_shaft * t_sim_arr) + 0.015 * np.random.randn(n_sim_vib)
+                    vib_hist = (t_sim_arr, ax_arr.astype(np.float32), ay_arr.astype(np.float32), az_arr.astype(np.float32))
+                    ax_g, ay_g, az_g = float(ax_arr[-1]), float(ay_arr[-1]), float(az_arr[-1])
+                elif demo_name == "DEMO_MISALIGNMENT_2X":
+                    rpm = 1750.0 + 12.0 * math.sin(self.demo_phase * 3.0)
+                    self.demo_pulses += 1
+                    pulses = self.demo_pulses
+                    f_shaft = rpm / 60.0
+                    ax_arr = 0.140 * np.sin(2.0 * np.pi * f_shaft * t_sim_arr) + 0.020 * np.random.randn(n_sim_vib)
+                    ay_arr = 0.160 * np.cos(2.0 * np.pi * f_shaft * t_sim_arr) + 0.020 * np.random.randn(n_sim_vib)
+                    az_arr = -0.82 + 0.380 * np.sin(4.0 * np.pi * f_shaft * t_sim_arr) + 0.025 * np.random.randn(n_sim_vib)
+                    vib_hist = (t_sim_arr, ax_arr.astype(np.float32), ay_arr.astype(np.float32), az_arr.astype(np.float32))
+                    ax_g, ay_g, az_g = float(ax_arr[-1]), float(ay_arr[-1]), float(az_arr[-1])
+                elif demo_name == "DEMO_DISTURBANCE_PROOF":
+                    rpm = 1800.0
+                    self.demo_pulses += 1
+                    pulses = self.demo_pulses
+                    f_shaft = rpm / 60.0
+                    ax_arr = 0.040 * np.sin(2.0 * np.pi * f_shaft * t_sim_arr) + 0.008 * np.random.randn(n_sim_vib)
+                    ay_arr = 0.050 * np.cos(2.0 * np.pi * f_shaft * t_sim_arr) + 0.008 * np.random.randn(n_sim_vib)
+                    az_arr = -0.82 + 0.020 * np.sin(4.0 * np.pi * f_shaft * t_sim_arr) + 0.008 * np.random.randn(n_sim_vib)
+                    vib_hist = (t_sim_arr, ax_arr.astype(np.float32), ay_arr.astype(np.float32), az_arr.astype(np.float32))
+                    ax_g, ay_g, az_g = float(ax_arr[-1]), float(ay_arr[-1]), float(az_arr[-1])
+                    # Injected acoustic noise proves PDF Page 13 disturbance rejection
+                    raw_frame = (raw_frame + 0.15 * np.random.randn(*raw_frame.shape)).astype(np.float32)
+
             motor_diag = self.motor_engine.analyze(raw_frame, fs, ax_g, ay_g, az_g, rpm, vib_history=vib_hist)
             dyn_vib_g = float(motor_diag.get("dyn_vib_g", 0.0))
 
@@ -2492,6 +2649,82 @@ class AcousticRadarApp:
                 self.motor_engine.learn_baseline(rpm, dyn_vib_g, raw_frame, fs)
                 self.learn_baseline_requested = False
 
+            # Update Live ADXL345 3-Axis Dynamic Vibration Scope (gs[1, 2])
+            if vib_hist is not None and len(vib_hist[1]) >= 8:
+                _, ax_pts, ay_pts, az_pts = vib_hist
+                n_vpts = min(len(ax_pts), 256)
+                x_v = np.arange(n_vpts)
+                dyn_x = ax_pts[-n_vpts:] - self.motor_engine.grav_x
+                dyn_y = ay_pts[-n_vpts:] - self.motor_engine.grav_y
+                dyn_z = az_pts[-n_vpts:] - self.motor_engine.grav_z
+                dyn_mag = np.sqrt(dyn_x**2 + dyn_y**2 + dyn_z**2)
+
+                self.vib_line_x.set_data(x_v, np.clip(dyn_x, -1.2, 1.2))
+                self.vib_line_y.set_data(x_v, np.clip(dyn_y, -1.2, 1.2))
+                self.vib_line_z.set_data(x_v, np.clip(dyn_z, -1.2, 1.2))
+                self.vib_line_dyn.set_data(x_v, np.clip(dyn_mag, -1.2, 1.2))
+                self.ax_vib.set_xlim(0, max(32, n_vpts))
+            else:
+                self.vib_line_x.set_data([], [])
+                self.vib_line_y.set_data([], [])
+                self.vib_line_z.set_data([], [])
+                self.vib_line_dyn.set_data([], [])
+
+            iso_zone_short = motor_diag["iso_severity"].split(":")[0]
+            self.vib_badge_text.set_text(
+                f"ADXL345: {len(vib_hist[1]) if vib_hist else 0} smp | a_dyn={dyn_vib_g:.3f}g\n"
+                f"ISO Vel={motor_diag.get('v_rms_mms', 0.0):.2f} mm/s | {iso_zone_short}"
+            )
+            self.vib_badge_text.set_color(motor_diag["iso_color"])
+
+            # Update Rotational Order Spectrum & Tachometer Speedometer (gs[0, 3])
+            if pulses > self._last_seen_pulses:
+                self._last_pulse_blink_time = now
+                self._last_seen_pulses = pulses
+
+            is_blinking = (now - self._last_pulse_blink_time) < 0.25
+
+            if is_blinking or (rpm > 10.0 and (int(now * 8) % 2 == 0)):
+                self.tach_indicator_text.set_text(f"● FC-03 TACH: PULSE ACTIVE ({pulses} Pulses)")
+                self.tach_indicator_text.set_color("#00ffcc")
+            elif pulses > 0:
+                self.tach_indicator_text.set_text(f"○ FC-03 TACH: READY ({pulses} Pulses)")
+                self.tach_indicator_text.set_color("#8da2c0")
+            else:
+                self.tach_indicator_text.set_text("○ FC-03 TACH: READY (0 Pulses — Shaft Idle)")
+                self.tach_indicator_text.set_color("#64748b")
+
+            if rpm > 30.0:
+                self.speedometer_text.set_text(f"SPEED: {rpm:6.1f} RPM (f0 = {motor_diag['f0_hz']:4.1f} Hz)")
+                self.speedometer_text.set_color("#00ffcc")
+            else:
+                self.speedometer_text.set_text("SPEED: 0.0 RPM (STOPPED / IDLE)")
+                self.speedometer_text.set_color("#64748b")
+
+            e1 = float(motor_diag.get("e_1x_pct", 0.0))
+            e2 = float(motor_diag.get("e_2x_pct", 0.0))
+            e3 = float(motor_diag.get("e_3x_pct", 0.0))
+
+            self.order_bars[0].set_height(e1)
+            self.order_bars[1].set_height(e2)
+            self.order_bars[2].set_height(e3)
+
+            c1 = "#ef4444" if e1 > 15.0 else ("#f59e0b" if e1 > 8.0 else "#00ffcc")
+            c2 = "#e879f9" if e2 > 12.0 else ("#a855f7" if e2 > 6.0 else "#38bdf8")
+            c3 = "#f43f5e" if e3 > 10.0 else "#64748b"
+
+            self.order_bars[0].set_color(c1)
+            self.order_bars[1].set_color(c2)
+            self.order_bars[2].set_color(c3)
+
+            self.bar_labels[0].set_position((0, max(2.0, e1 + 2.0)))
+            self.bar_labels[0].set_text(f"{e1:.1f}%")
+            self.bar_labels[1].set_position((1, max(2.0, e2 + 2.0)))
+            self.bar_labels[1].set_text(f"{e2:.1f}%")
+            self.bar_labels[2].set_position((2, max(2.0, e3 + 2.0)))
+            self.bar_labels[2].set_text(f"{e3:.1f}%")
+
+            # 8. Multimodal Motor Health & Diagnostic HUD Text (gs[1, 3])
             dir_str = "CENTER" if abs(target_angle) < 6.0 else ("RIGHT" if target_angle > 0 else "LEFT")
             lock_badge = f"* LOCKED ({dir_str})" if is_locked else "SEARCHING / SCANNING..."
             invert_badge = "INVERTED (Key 'I')" if self.invert_channels else "NORMAL (Key 'I')"
@@ -2546,7 +2779,7 @@ class AcousticRadarApp:
                 f" [S2: ADXL345 3-AXIS] Dyn Vib: {dyn_vib_g:4.3f}g | ISO Vel: {motor_diag.get('v_rms_mms', 0.0):4.2f} mm/s (ω-Int) | Raw: [X:{ax_g:+5.2f}, Y:{ay_g:+5.2f}, Z:{az_g:+5.2f}]",
                 f"                      Severity: {motor_diag['iso_severity']}",
                 f" [S3: ACOUSTIC EMIT]  Kurtosis: {motor_diag['kurtosis']:4.2f} (Norm=3.0) | Crest Factor: {motor_diag['crest_factor']:4.1f}",
-                f" [S4: VIB HARMONICS]  1x(Unbalance)={motor_diag['e_1x_pct']:4.1f}% | 2x(Misalignment)={motor_diag['e_2x_pct']:4.1f}%",
+                f" [S4: VIB HARMONICS]  1x(Unbalance)={motor_diag['e_1x_pct']:4.1f}% | 2x(Misalignment)={motor_diag['e_2x_pct']:4.1f}% | 3x={motor_diag.get('e_3x_pct', 0.0):4.1f}%",
                 "------------------------------------------------------------------------------------------",
                 f" [DIRECTIONAL RADAR]  Target: {target_angle:+6.1f}° [{dir_str:<6}] | Focus: {dom_tag} | Range: Unconstrained (DOA θ-Ray)",
                 f"   LEFT FLANK  : [{make_vu_bar(pct_l)}] {pct_l:4.1f}% ({db_l:+5.1f} dBFS) {'◄-- ACTIVE' if dom_s=='LEFT' and is_active_sound else ''}",
@@ -2559,7 +2792,7 @@ class AcousticRadarApp:
                 "==========================================================================================",
                 f" [HOTKEYS] 'B': Learn Baseline  |  'C': Clear Baseline  |  'P': Cycle PPR ({self.pulses_per_rev})",
                 "           'N': Calib Ambient   |  'K': Toggle Calib    |  'I': Invert Polarity  |  'R': Reset Tracker",
-                "           '1': Laptop Mic      |  '2': ESP32 4-Mic     |  '3': Synthetic Sim"
+                "           '1': Laptop Mic      |  '2': ESP32 4-Mic     |  '3': Synthetic Sim   |  'T': Cycle Motor Test"
             ]
             self.hud_text.set_text("\n".join(hud_lines))
 
@@ -2568,14 +2801,7 @@ class AcousticRadarApp:
                 print(f"[!] Warning in GUI update loop: {e}", file=sys.stderr)
                 self._last_err_time = time.time()
 
-        return [
-            self.im_heat, self.marker_source, self.target_line,
-            self.radar_line, self.radar_needle, self.meas_needle,
-            self.srp_line, self.srp_peak_marker, self.hud_text,
-            self.left_gauge_bg, self.left_gauge_fill, self.left_gauge_text,
-            self.right_gauge_bg, self.right_gauge_fill, self.right_gauge_text,
-            self.sector_banner_text
-        ] + self.wave_lines + self.vu_texts
+        return all_artists
 
     def run(self):
         self.anim = FuncAnimation(
