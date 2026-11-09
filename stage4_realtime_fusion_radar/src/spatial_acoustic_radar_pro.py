@@ -1038,10 +1038,12 @@ class MultimodalMotorEngine:
             iso_color = "#ff0055"
             vib_penalty = 50.0 + min(35.0, (dyn_g - 0.70) * 40.0)
 
+        is_motor_running = bool(rpm >= 30.0)
+
         # 2. Rotational Order Analysis from Multi-Axis Power Spectrum (Orientation Invariant, No Rectification Doubling)
-        f0 = max(1.0, rpm / 60.0)
+        f0 = (rpm / 60.0) if is_motor_running else 0.0
         n_samples_vib = len(dyn_axes[0])
-        if n_samples_vib >= 32 and rpm > 60.0:
+        if is_motor_running and n_samples_vib >= 32 and rpm > 60.0:
             n_fft = max(256, n_samples_vib * 4)  # Zero-padding for ~0.08 Hz bin spacing
             vib_freqs = np.fft.rfftfreq(n_fft, d=1.0 / fs_vib)
             # Sum power spectra of each signed axis: P(f) = |X(f)|^2 + |Y(f)|^2 + |Z(f)|^2
@@ -1102,11 +1104,14 @@ class MultimodalMotorEngine:
         spec = np.abs(np.fft.rfft(x))
 
         # 3. Fault Classification Diagnostics (Multimodal Edge-AI Decision Rules)
-        fault_label = "NOMINAL / SMOOTH OPERATION"
         is_acoustic_elevated = bool(rms > 0.025 or kurt > 4.2 or crest > 4.2)
         is_vib_elevated = bool(dyn_g > 0.25)
 
-        if is_vib_elevated and dyn_g > 0.40 and e_1x > 0.12:
+        if not is_motor_running:
+            fault_label = "MOTOR STOPPED / STANDBY (Awaiting Rotation)"
+            iso_severity = "STANDBY: MOTOR OFF"
+            iso_color = "#64748b"
+        elif is_vib_elevated and dyn_g > 0.40 and e_1x > 0.12:
             fault_label = "MASS UNBALANCE (Strong 1x RPM Vibration)"
         elif is_vib_elevated and dyn_g > 0.30 and e_2x > 0.10:
             fault_label = "SHAFT MISALIGNMENT / BENT (Strong 2x RPM)"
@@ -1119,6 +1124,8 @@ class MultimodalMotorEngine:
             fault_label = "ACOUSTIC DISTURBANCE DETECTED (Vibration Nominal -> Non-Mechanical)"
         elif rms > 0.035 and kurt < 2.5:
             fault_label = "COMMUTATOR NOISE / MECHANICAL DRAG"
+        else:
+            fault_label = "NOMINAL / SMOOTH OPERATION"
 
         # 4. Golden Baseline Comparison (Detecting Tiny Differences!)
         delta_info = {
@@ -1129,7 +1136,7 @@ class MultimodalMotorEngine:
             "spec_dist_pct": 0.0
         }
         delta_penalty = 0.0
-        if self.baseline_locked:
+        if self.baseline_locked and is_motor_running:
             d_rpm = rpm - self.b_rpm
             d_vib = dyn_g - self.b_vib_g
             d_kurt = kurt - self.b_kurt
@@ -1155,13 +1162,17 @@ class MultimodalMotorEngine:
             )
 
         # 5. Composite Motor Health Score (0 - 100%)
-        total_penalty = vib_penalty + max(0.0, (kurt - 3.0) * 3.0) + delta_penalty
-        if is_acoustic_elevated and not is_vib_elevated:
-            # External environmental acoustic noise must not degrade mechanical motor health rating
-            total_penalty = min(total_penalty, 5.0)
-        health_score = max(5.0, min(100.0, 100.0 - total_penalty))
+        if not is_motor_running:
+            health_score = 0.0
+        else:
+            total_penalty = vib_penalty + max(0.0, (kurt - 3.0) * 3.0) + delta_penalty
+            if is_acoustic_elevated and not is_vib_elevated:
+                # External environmental acoustic noise must not degrade mechanical motor health rating
+                total_penalty = min(total_penalty, 5.0)
+            health_score = max(5.0, min(100.0, 100.0 - total_penalty))
 
         return {
+            "is_running": is_motor_running,
             "health_score": health_score,
             "rpm": rpm,
             "rpm_jitter": rpm_jitter,
@@ -1209,14 +1220,14 @@ def compute_packet_checksum(data: bytes) -> int:
 class ESP32MultimodalSource(AudioSourceBase):
     """
     Production 4-Channel Real-Time PCM Ingestion from ESP32 on COM8.
-    Streams 11,025 Hz 16-bit 4-channel audio + ADXL345 3-axis vibration (continuous 400 Hz FIFO stream)
-    + FC-03 tachometer at 1,152,000 baud using zero-copy binary DMA packets (packet type 0x05).
+    Streams 10,000 Hz 16-bit 4-channel audio + ADXL345 3-axis vibration (continuous 400 Hz FIFO stream)
+    + FC-03 tachometer at 921,600 baud using zero-copy binary DMA packets (packet type 0x05).
     """
 
     def __init__(self, port: str = "COM8", baudrates: Tuple[int, ...] = (921600, 1152000, 115200)):
         self.port = port
         self.baudrates = baudrates
-        self.fs = 11025.0
+        self.fs = 10000.0
         self.channels = 4
         self.frame_len = 512
 
@@ -1506,11 +1517,16 @@ class ESP32MultimodalSource(AudioSourceBase):
                         self.last_pulse_count = pulses
                         self.last_pulse_time = now
 
+                    adxl_hw_ok = bool(reserved & 0x01)
+                    adxl_hw_str = "ADXL345: ONLINE (400Hz FIFO)" if adxl_hw_ok else "ADXL345: OFFLINE / ABSENT"
+
                     self.telemetry.update({
                         "ax_g": latest_ax,
                         "ay_g": latest_ay,
                         "az_g": latest_az,
                         "rpm_pulses": pulses,
+                        "adxl_hw_ok": adxl_hw_ok,
+                        "adxl_hw_str": adxl_hw_str,
                         "firmware_mode": f"4-CH REAL-TIME PCM DMA STREAM ({port_str} @ {baud_str}) [Type 0x05 400Hz FIFO]",
                         "is_hardware_alive": True,
                         "packets_valid": self.packets_valid,
@@ -1993,10 +2009,10 @@ class AcousticRadarApp:
         # Col 3: Rotational Orders & Tachometer (Top) + Multimodal Motor Health HUD (Bottom)
         gs = gridspec.GridSpec(
             2, 4,
-            width_ratios=[1.15, 0.90, 0.95, 1.05],
+            width_ratios=[1.10, 0.90, 0.92, 1.08],
             height_ratios=[1.0, 1.0],
-            hspace=0.28, wspace=0.22,
-            left=0.035, right=0.985, top=0.93, bottom=0.05
+            hspace=0.28, wspace=0.24,
+            left=0.030, right=0.985, top=0.93, bottom=0.04
         )
 
         # ---------------------------------------------------------------------
@@ -2261,7 +2277,7 @@ class AcousticRadarApp:
         self.ax_telemetry.axis("off")
         self.hud_text = self.ax_telemetry.text(
             0.02, 0.98, "Acquiring Multimodal Telemetry...",
-            va="top", ha="left", color="#e0e6ed", fontsize=7.6, family="monospace", linespacing=1.08
+            va="top", ha="left", color="#e0e6ed", fontsize=7.3, family="monospace", linespacing=1.05
         )
 
         # Main Title Banner
@@ -2670,10 +2686,15 @@ class AcousticRadarApp:
                 self.vib_line_z.set_data([], [])
                 self.vib_line_dyn.set_data([], [])
 
+            is_running = bool(motor_diag.get("is_running", False))
             iso_zone_short = motor_diag["iso_severity"].split(":")[0]
+            adxl_hw = telemetry.get("adxl_hw_str", "ADXL345: STANDBY")
+            num_v_smp = telemetry.get("num_vib_last", len(vib_hist[1]) if (vib_hist and len(vib_hist[1])) else 0)
+            status_note = "MOTOR OFF" if not is_running else iso_zone_short
+
             self.vib_badge_text.set_text(
-                f"ADXL345: {len(vib_hist[1]) if vib_hist else 0} smp | a_dyn={dyn_vib_g:.3f}g\n"
-                f"ISO Vel={motor_diag.get('v_rms_mms', 0.0):.2f} mm/s | {iso_zone_short}"
+                f"{adxl_hw} ({num_v_smp} smp/pkt)\n"
+                f"a_dyn={dyn_vib_g:.3f}g | ISO Vel={motor_diag.get('v_rms_mms', 0.0):.2f} mm/s | {status_note}"
             )
             self.vib_badge_text.set_color(motor_diag["iso_color"])
 
@@ -2684,7 +2705,7 @@ class AcousticRadarApp:
 
             is_blinking = (now - self._last_pulse_blink_time) < 0.25
 
-            if is_blinking or (rpm > 10.0 and (int(now * 8) % 2 == 0)):
+            if is_blinking or (is_running and (int(now * 8) % 2 == 0)):
                 self.tach_indicator_text.set_text(f"● FC-03 TACH: PULSE ACTIVE ({pulses} Pulses)")
                 self.tach_indicator_text.set_color("#00ffcc")
             elif pulses > 0:
@@ -2694,12 +2715,12 @@ class AcousticRadarApp:
                 self.tach_indicator_text.set_text("○ FC-03 TACH: READY (0 Pulses — Shaft Idle)")
                 self.tach_indicator_text.set_color("#64748b")
 
-            if rpm > 30.0:
-                self.speedometer_text.set_text(f"SPEED: {rpm:6.1f} RPM (f0 = {motor_diag['f0_hz']:4.1f} Hz)")
+            if is_running:
+                self.speedometer_text.set_text(f"● MOTOR RUNNING: {rpm:5.0f} RPM (f0 = {motor_diag['f0_hz']:.1f} Hz)")
                 self.speedometer_text.set_color("#00ffcc")
             else:
-                self.speedometer_text.set_text("SPEED: 0.0 RPM (STOPPED / IDLE)")
-                self.speedometer_text.set_color("#64748b")
+                self.speedometer_text.set_text("○ MOTOR STOPPED / IDLE (0 RPM)")
+                self.speedometer_text.set_color("#94a3b8")
 
             e1 = float(motor_diag.get("e_1x_pct", 0.0))
             e2 = float(motor_diag.get("e_2x_pct", 0.0))
@@ -2730,7 +2751,7 @@ class AcousticRadarApp:
             invert_badge = "INVERTED (Key 'I')" if self.invert_channels else "NORMAL (Key 'I')"
             hw_badge = "STREAMING (COM8)" if hw_alive else "STANDBY / SIMULATION"
 
-            def make_vu_bar(pct, width=14):
+            def make_vu_bar(pct, width=12):
                 filled = int(round((pct / 100.0) * width))
                 filled = max(0, min(width, filled))
                 return "█" * filled + "░" * (width - filled)
@@ -2740,59 +2761,69 @@ class AcousticRadarApp:
             db_r = 20.0 * math.log10(max(intensity_r, 1e-4))
 
             dom_tag = {
-                "LEFT": "◄◄ LEFT FLANK",
-                "CENTER": "▲ FRONT CENTER",
-                "RIGHT": "RIGHT FLANK ►►"
+                "LEFT": "LEFT FLANK",
+                "CENTER": "FRONT CENTER",
+                "RIGHT": "RIGHT FLANK"
             }.get(dom_s, "") if is_active_sound else "QUIET IDLE"
 
             # Motor Health Index Display
-            h_score = float(motor_diag["health_score"])
-            h_bar = make_vu_bar(h_score, width=16)
-            if h_score >= 85:
-                h_status = "EXCELLENT (NOMINAL)"
-            elif h_score >= 65:
-                h_status = "PERMISSIBLE (MILD WEAR)"
-            elif h_score >= 40:
-                h_status = "WARNING (DEGRADED)"
+            if not is_running:
+                h_bar = "░" * 12
+                h_score_str = " --.-%"
+                h_status = "STANDBY (STOPPED)"
             else:
-                h_status = "CRITICAL FAULT / STOP"
+                h_score = float(motor_diag["health_score"])
+                h_bar = make_vu_bar(h_score, width=12)
+                h_score_str = f"{h_score:5.1f}%"
+                if h_score >= 85:
+                    h_status = "EXCELLENT"
+                elif h_score >= 65:
+                    h_status = "PERMISSIBLE"
+                elif h_score >= 40:
+                    h_status = "WARNING"
+                else:
+                    h_status = "CRITICAL"
 
             # Baseline Status Line
             if motor_diag["baseline_locked"]:
                 d = motor_diag["delta"]
-                base_str = f"LOCKED | ΔVib:{d['d_vib_g']:+.2f}g | ΔRPM:{d['d_rpm']:+4.0f} | ΔKurt:{d['d_kurt']:+.1f} | ΔRMS:{d['d_rms_pct']:+3.0f}%"
+                base_str = f"LOCKED (ΔVib:{d['d_vib_g']:+.2f}g, ΔRPM:{d['d_rpm']:+.0f})"
             else:
-                base_str = "UNLOCKED  [Press 'B' to Learn Reference Baseline]"
+                base_str = "UNLOCKED [Press 'B' to Learn]"
 
             mode_tag = self._get_evidence_mode_tag()
             self.title_text.set_text(f"SPATIAL MULTIMODAL ACOUSTIC RADAR | [{mode_tag}]")
 
+            f0_str = f"f0={motor_diag['f0_hz']:.1f}Hz" if is_running else "IDLE"
+            if self.demo_profile_idx > 0:
+                adxl_short = "DEMO (400Hz SIM)"
+            else:
+                adxl_short = "ONLINE (FIFO)" if telemetry.get("adxl_hw_ok", False) else "OFFLINE/CHECK I2C"
+            iso_short = motor_diag["iso_severity"].split(":")[0]
+            calib_short = "ACTIVE" if self.apply_calibration else "BYPASS"
+            vad_short = "ACTIVE" if is_active_sound else "QUIET"
+
             hud_lines = [
-                "==========================================================================================",
-                f" [EVIDENCE MODE]       [{mode_tag}]",
-                f" [MOTOR HEALTH INDEX]  [{h_bar}] {h_score:4.1f}% | {h_status}",
-                f" [DIAGNOSED FAULT]     {motor_diag['primary_fault']}",
-                f" [GOLDEN BASELINE]     {base_str}",
-                "------------------------------------------------------------------------------------------",
-                f" [S1: FC-03 TACH]     Speed: {rpm:6.1f} RPM (f0 = {motor_diag['f0_hz']:4.1f} Hz) | Jitter: ±{motor_diag['rpm_jitter']:3.1f} RPM",
-                f"                      Total: {pulses:6d} Pulses | PPR: {self.pulses_per_rev} (Key 'P' to cycle)",
-                f" [S2: ADXL345 3-AXIS] Dyn Vib: {dyn_vib_g:4.3f}g | ISO Vel: {motor_diag.get('v_rms_mms', 0.0):4.2f} mm/s (ω-Int) | Raw: [X:{ax_g:+5.2f}, Y:{ay_g:+5.2f}, Z:{az_g:+5.2f}]",
-                f"                      Severity: {motor_diag['iso_severity']}",
-                f" [S3: ACOUSTIC EMIT]  Kurtosis: {motor_diag['kurtosis']:4.2f} (Norm=3.0) | Crest Factor: {motor_diag['crest_factor']:4.1f}",
-                f" [S4: VIB HARMONICS]  1x(Unbalance)={motor_diag['e_1x_pct']:4.1f}% | 2x(Misalignment)={motor_diag['e_2x_pct']:4.1f}% | 3x={motor_diag.get('e_3x_pct', 0.0):4.1f}%",
-                "------------------------------------------------------------------------------------------",
-                f" [DIRECTIONAL RADAR]  Target: {target_angle:+6.1f}° [{dir_str:<6}] | Focus: {dom_tag} | Range: Unconstrained (DOA θ-Ray)",
-                f"   LEFT FLANK  : [{make_vu_bar(pct_l)}] {pct_l:4.1f}% ({db_l:+5.1f} dBFS) {'◄-- ACTIVE' if dom_s=='LEFT' and is_active_sound else ''}",
-                f"   FRONT CENTER: [{make_vu_bar(pct_c)}] {pct_c:4.1f}% ({db_c:+5.1f} dBFS) {'▲-- ACTIVE' if dom_s=='CENTER' and is_active_sound else ''}",
-                f"   RIGHT FLANK : [{make_vu_bar(pct_r)}] {pct_r:4.1f}% ({db_r:+5.1f} dBFS) {'ACTIVE --►' if dom_s=='RIGHT' and is_active_sound else ''}",
-                f" [CALIBRATION & VAD]  Phase Calib: {self.calib_status_str} | Ambient Floor: {self.noise_floor:.5f} | VAD: {'ACTIVE SOUND' if is_active_sound else 'QUIET IDLE'}",
-                f" [SERIAL INTEGRITY]   Valid Pkts: {telemetry.get('packets_valid', 0)} | Drops: {telemetry.get('dropped_packets', 0)} | ChkErr: {telemetry.get('checksum_errors', 0)}",
-                f" [ARRAY APERTURE]     Spacing: {self.geometry.baseline_m * 1000.0:4.1f} mm | Span: {self.geometry.baseline_m * 3000.0:4.1f} mm | [{invert_badge}]",
-                f" [HARDWARE LINK]      Status: {hw_badge} | Mode: {fw_mode}",
-                "==========================================================================================",
-                f" [HOTKEYS] 'B': Learn Baseline  |  'C': Clear Baseline  |  'P': Cycle PPR ({self.pulses_per_rev})",
-                "           'N': Calib Ambient   |  'K': Toggle Calib    |  'I': Invert Polarity  |  'R': Reset Tracker",
-                "           '1': Laptop Mic      |  '2': ESP32 4-Mic     |  '3': Synthetic Sim   |  'T': Cycle Motor Test"
+                "======================================================",
+                f" [EVIDENCE MODE]  {mode_tag[:36]}",
+                f" [MOTOR HEALTH]   [{h_bar}] {h_score_str} | {h_status}",
+                f" [DIAGNOSIS]      {motor_diag['primary_fault'][:38]}",
+                f" [BASELINE]       {base_str[:36]}",
+                "------------------------------------------------------",
+                f" [S1: TACHOMETER] Speed: {rpm:5.0f} RPM ({f0_str})",
+                f"                  Pulses: {pulses} (PPR={self.pulses_per_rev}, Key 'P')",
+                f" [S2: ADXL345]    {adxl_short} ({num_v_smp} smp)",
+                f"                  a_dyn:{dyn_vib_g:.3f}g | ISO:{motor_diag.get('v_rms_mms', 0.0):.2f}mm/s ({iso_short})",
+                f" [S3: ACOUSTIC]   Kurtosis: {motor_diag['kurtosis']:4.2f} | Crest: {motor_diag['crest_factor']:4.1f}",
+                f" [S4: HARMONICS]  1X={e1:4.1f}% | 2X={e2:4.1f}% | 3X={e3:4.1f}%",
+                "------------------------------------------------------",
+                f" [DOA TARGET]     {target_angle:+5.1f}° [{dir_str}] ({dom_tag[:14]})",
+                f"   FLANKS         L:{pct_l:4.1f}% | C:{pct_c:4.1f}% | R:{pct_r:4.1f}%",
+                f" [HARDWARE BUS]   COM8 @ 921.6k | Valid:{telemetry.get('packets_valid', 0)} Drop:{telemetry.get('dropped_packets', 0)}",
+                f" [CALIB & VAD]    Phase:{calib_short} | VAD:{vad_short} | Flr:{self.noise_floor:.4f}",
+                "======================================================",
+                " HOTKEYS: 'B' Baseline | 'C' Clear | 'P' PPR | 'T' Demo",
+                "          '1' Laptop   | '2' ESP32 | 'K' Cal | 'I' Invert"
             ]
             self.hud_text.set_text("\n".join(hud_lines))
 

@@ -80,6 +80,7 @@ volatile uint32_t tach_pulse_count = 0;
 volatile int64_t last_tach_isr_us = 0;
 #define TACH_DEBOUNCE_US 200  // Refractory debounce window (max 5,000 Hz: 15,000 RPM for 20-slot disc, 300,000 RPM for 1-slot)
 bool adxl_present = false;
+uint32_t adxl_i2c_errors = 0;
 bool continuous_streaming = true;
 uint16_t packet_seq = 0;
 uint32_t last_ascii_time = 0;
@@ -148,15 +149,21 @@ uint8_t read_adxl_fifo(AccelSample *out_buf, uint8_t max_samples) {
 
     Wire.beginTransmission(adxl_addr);
     Wire.write(ADXL345_FIFO_STATUS);
-    Wire.endTransmission(false);
+    if (Wire.endTransmission(false) != 0) {
+        adxl_i2c_errors++;
+        return 0;
+    }
     Wire.requestFrom((uint8_t)adxl_addr, (uint8_t)1);
     uint8_t entries = Wire.available() ? (Wire.read() & 0x3F) : 0;
 
-    // Graceful fallback for clone chip or empty FIFO: read latest single sample directly
+    // Direct single-sample read fallback if FIFO empty
     if (entries == 0) {
         Wire.beginTransmission(adxl_addr);
         Wire.write(ADXL345_DATAX0);
-        Wire.endTransmission(false);
+        if (Wire.endTransmission(false) != 0) {
+            adxl_i2c_errors++;
+            return 0;
+        }
         Wire.requestFrom((uint8_t)adxl_addr, (uint8_t)6);
         if (Wire.available() == 6) {
             int16_t rx = Wire.read() | (Wire.read() << 8);
@@ -167,33 +174,35 @@ uint8_t read_adxl_fifo(AccelSample *out_buf, uint8_t max_samples) {
             out_buf[0].z_mg = (int16_t)(rz * 3.9f);
             return 1;
         } else {
-            out_buf[0].x_mg = 0;
-            out_buf[0].y_mg = 0;
-            out_buf[0].z_mg = -820;
-            return 1;
+            adxl_i2c_errors++;
+            return 0; // TRUTHFUL: zero samples on read failure
         }
     }
 
     if (entries > max_samples) entries = max_samples;
+    uint8_t valid_count = 0;
     for (uint8_t i = 0; i < entries; i++) {
         Wire.beginTransmission(adxl_addr);
         Wire.write(ADXL345_DATAX0);
-        Wire.endTransmission(false);
+        if (Wire.endTransmission(false) != 0) {
+            adxl_i2c_errors++;
+            break;
+        }
         Wire.requestFrom((uint8_t)adxl_addr, (uint8_t)6);
         if (Wire.available() == 6) {
             int16_t rx = Wire.read() | (Wire.read() << 8);
             int16_t ry = Wire.read() | (Wire.read() << 8);
             int16_t rz = Wire.read() | (Wire.read() << 8);
-            out_buf[i].x_mg = (int16_t)(rx * 3.9f);
-            out_buf[i].y_mg = (int16_t)(ry * 3.9f);
-            out_buf[i].z_mg = (int16_t)(rz * 3.9f);
+            out_buf[valid_count].x_mg = (int16_t)(rx * 3.9f);
+            out_buf[valid_count].y_mg = (int16_t)(ry * 3.9f);
+            out_buf[valid_count].z_mg = (int16_t)(rz * 3.9f);
+            valid_count++;
         } else {
-            out_buf[i].x_mg = 0;
-            out_buf[i].y_mg = 0;
-            out_buf[i].z_mg = -820;
+            adxl_i2c_errors++;
+            break;
         }
     }
-    return entries;
+    return valid_count;
 }
 
 void init_dual_i2s_4mic() {
@@ -282,9 +291,9 @@ void setup() {
     init_adxl345();
     init_dual_i2s_4mic();
 
-    // FC-03 Tachometer ISR
+    // FC-03 Tachometer ISR: Active-low optical blade entry triggers on FALLING edge
     pinMode(FC03_DO_PIN, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(FC03_DO_PIN), fc03_isr, RISING);
+    attachInterrupt(digitalPinToInterrupt(FC03_DO_PIN), fc03_isr, FALLING);
 
     Serial.println("\n[SPATIAL_RADAR] ESP32 4-Mic Dual-I2S Multimodal Streamer Online");
     if (adxl_present) {
@@ -390,11 +399,18 @@ void loop() {
                 float rms2 = sqrt(s2 / CHUNK_FRAMES);
                 float rms3 = sqrt(s3 / CHUNK_FRAMES);
                 float rms4 = sqrt(s4 / CHUNK_FRAMES);
-                int16_t ax = num_vib > 0 ? tx_accel_chunk[num_vib - 1].x_mg : 0;
-                int16_t ay = num_vib > 0 ? tx_accel_chunk[num_vib - 1].y_mg : 0;
-                int16_t az = num_vib > 0 ? tx_accel_chunk[num_vib - 1].z_mg : -820;
-                Serial.printf("[4-MIC LIVE] Mic1(D19_L):%6.1f | Mic2(D19_R):%6.1f | Mic3(D23_L):%6.1f | Mic4(D23_R):%6.1f | Accel(samples=%d): X=%+0.2fg Y=%+0.2fg Z=%+0.2fg | Tach:%u\n",
-                              rms1, rms2, rms3, rms4, num_vib, ax / 1000.0f, ay / 1000.0f, az / 1000.0f, pulses);
+                int pin4_state = digitalRead(FC03_DO_PIN);
+
+                if (num_vib > 0) {
+                    int16_t ax = tx_accel_chunk[num_vib - 1].x_mg;
+                    int16_t ay = tx_accel_chunk[num_vib - 1].y_mg;
+                    int16_t az = tx_accel_chunk[num_vib - 1].z_mg;
+                    Serial.printf("[4-MIC LIVE] Mic1(D19_L):%6.1f | Mic2(D19_R):%6.1f | Mic3(D23_L):%6.1f | Mic4(D23_R):%6.1f | Accel(samples=%d): X=%+0.2fg Y=%+0.2fg Z=%+0.2fg | Tach:%u (Pin4=%d)\n",
+                                  rms1, rms2, rms3, rms4, num_vib, ax / 1000.0f, ay / 1000.0f, az / 1000.0f, pulses, pin4_state);
+                } else {
+                    Serial.printf("[4-MIC LIVE] Mic1(D19_L):%6.1f | Mic2(D19_R):%6.1f | Mic3(D23_L):%6.1f | Mic4(D23_R):%6.1f | Accel: NO VALID SAMPLES (Err=%u) | Tach:%u (Pin4=%d)\n",
+                                  rms1, rms2, rms3, rms4, adxl_i2c_errors, pulses, pin4_state);
+                }
             }
         }
     }

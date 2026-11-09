@@ -143,9 +143,13 @@ def run_benchmark(test_angles: List[float], port: str = "COM8", baud: int = 9216
         audio, fs = None, 10000.0
         if not use_synthetic:
             audio, fs = record_physical_audio(duration=2.5, port=port, baud=baud)
-
-        if audio is None:
-            print(f"    [-] ESP32 on {port} unpowered. Using high-fidelity physical propagation model.")
+            if audio is None:
+                print(f"    [-] ERROR: ESP32 on {port} is disconnected or not streaming.")
+                print(f"        Physical calibration requires live acoustic recordings at {theta_true:+.1f}°.")
+                print(f"        Benchmark aborted without generating or writing fake calibration data.")
+                return None
+        else:
+            print(f"    [!] NOTE: Explicit --synthetic simulation mode active.")
             audio, fs = simulate_known_angle_audio(theta_true, duration=2.5, fs=10000.0)
 
         # Run SRP-PHAT beamforming engine across all 6 pairs
@@ -237,6 +241,7 @@ def run_benchmark(test_angles: List[float], port: str = "COM8", baud: int = 9216
     # Save JSON summary
     bench_data = {
         "array": "4-Mic INMP441 Linear Array",
+        "provenance": "SYNTHETIC_SIMULATION (EXPLICIT USER FLAG)" if use_synthetic else "PHYSICAL_HARDWARE (4-Mic INMP441 COM8)",
         "pitch_mm": 20.32,
         "span_mm": 60.96,
         "mean_error_deg": round(mean_err, 2),

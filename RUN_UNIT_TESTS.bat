@@ -1,24 +1,37 @@
 @echo off
+@chcp 65001 >nul
+title Spatial Multimodal Edge-AI -- Automated Test Suite
+color 0B
 setlocal
-echo =====================================================================
-echo  SPATIAL MULTIMODAL EDGE-AI -- AUTOMATED TEST SUITE (MILESTONE 3 / R4)
-echo  Validating GCC-PHAT, SRP-PHAT, Phase Compensation, Dynamic Vibration,
-echo  16-bit XOR Checksum, and Rotational Order Tracking
-echo =====================================================================
-echo(
+cls
+echo ╔══════════════════════════════════════════════════════════════════════════════╗
+echo ║         SPATIAL MULTIMODAL EDGE-AI -- COMPLETE AUTOMATED TEST SUITE          ║
+echo ║   55 Unit & Adversarial Tests across DSP, Multimodal, Firmware, & Physics    ║
+echo ╚══════════════════════════════════════════════════════════════════════════════╝
+echo.
 
 cd /d "%~dp0"
+set "PYTHONUNBUFFERED=1"
 
-python -m unittest tests\test_multimodal_pipeline.py
+set "PYTHON_BIN=C:\Python314\python.exe"
+if not exist "%PYTHON_BIN%" set "PYTHON_BIN=python"
+
+echo [*] Running full discovery across 'tests' directory...
+echo.
+
+"%PYTHON_BIN%" -m unittest discover -s tests
 
 if not errorlevel 1 (
-    echo(
-    echo =====================================================================
-    echo [PASS] All test suite assertions verified successfully!
-    echo =====================================================================
+    echo.
+    echo ════════════════════════════════════════════════════════════════════════════
+    echo [PASS] All 55 test assertions passed cleanly! Zero regressions detected.
+    echo ════════════════════════════════════════════════════════════════════════════
 ) else (
-    echo(
-    echo [FAIL] Unit tests encountered assertions errors.
+    echo.
+    echo ════════════════════════════════════════════════════════════════════════════
+    echo [FAIL] Test suite encountered assertions errors. Check log output above.
+    echo ════════════════════════════════════════════════════════════════════════════
 )
 
+echo.
 pause

@@ -377,6 +377,7 @@ class MotorExperimentRecorder:
 
         meta = {
             "mode": self.mode,
+            "data_provenance": "SYNTHETIC_SIMULATION (EXPLICIT USER FLAG)" if self.use_synthetic else "PHYSICAL_HARDWARE (COM8 ESP32 Stream)",
             "duration_s": self.duration,
             "total_samples": len(self.timestamps_us),
             "sample_rate_vib_hz": 400.0,
@@ -412,12 +413,18 @@ class MotorExperimentRecorder:
         return {"csv": csv_path, "wav": wav_path, "meta": meta_path}
 
     def run(self):
-        success = False
         if not self.use_synthetic:
             success = self.record_hardware()
-
-        if not success:
-            print("[*] Proceeding with high-fidelity physical model simulation...")
+            if not success:
+                print("\n[-] ERROR: Physical hardware recording failed. No packets received on COM8.")
+                print("    Please ensure:")
+                print("      1. ESP32 is plugged into COM8 at 921600 baud.")
+                print("      2. Radar GUI (RUN_LIVE_RADAR.bat) is closed to release serial port.")
+                print("      3. DC Motor is running and sensor breadboard is powered.")
+                print("    Physical motor run aborted without generating or writing fake data.")
+                return False
+        else:
+            print("\n[!] NOTE: Explicit --synthetic flag provided. Generating simulated run...")
             self.generate_synthetic_physical_run()
 
         return self.save_artifacts()

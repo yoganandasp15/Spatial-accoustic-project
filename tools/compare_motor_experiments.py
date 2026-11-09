@@ -48,47 +48,54 @@ def load_experiment_csv(csv_path: str):
     }
 
 
-def compute_spectral_metrics(t_s: np.ndarray, dyn_mag: np.ndarray, rpm_arr: np.ndarray):
+def compute_spectral_metrics(t_s: np.ndarray, ax: np.ndarray, ay: np.ndarray, az: np.ndarray, dyn_mag: np.ndarray, rpm_arr: np.ndarray):
     dt = float(np.mean(np.diff(t_s))) if len(t_s) > 1 else 0.0025
     fs = 1.0 / dt
-    n_samples = len(dyn_mag)
+    n_samples = len(ax)
 
-    # Detrend
-    mean_val = float(np.mean(dyn_mag))
-    ac_signal = dyn_mag - mean_val
-    rms_dyn = float(np.sqrt(np.mean(ac_signal**2)))
-    peak_dyn = float(np.max(np.abs(ac_signal)))
+    # Detrend signed axes to preserve vibration excursion and avoid rectification
+    dyn_x = ax - np.mean(ax)
+    dyn_y = ay - np.mean(ay)
+    dyn_z = az - np.mean(az)
+
+    rms_dyn = float(np.sqrt(np.mean(dyn_x**2 + dyn_y**2 + dyn_z**2)))
+    peak_dyn = float(np.max(np.sqrt(dyn_x**2 + dyn_y**2 + dyn_z**2)))
     crest = peak_dyn / max(rms_dyn, 1e-12)
-    kurtosis = float(np.mean(ac_signal**4) / (np.mean(ac_signal**2)**2 + 1e-12))
+    kurtosis = float(np.mean(dyn_x**4 + dyn_y**4 + dyn_z**4) / (3.0 * (rms_dyn**4) + 1e-12))
 
     mean_rpm = float(np.mean(rpm_arr))
     f0 = max(1.0, mean_rpm / 60.0)
 
-    # FFT with Hanning window
+    # Multi-Axis Power Spectrum (Orientation-Invariant, Zero-Rectification):
+    # P(f) = |X(f)|^2 + |Y(f)|^2 + |Z(f)|^2
     w = np.hanning(n_samples)
-    fft_vals = np.abs(np.fft.rfft(ac_signal * w)) / (np.sum(w) / 2.0)
+    sum_w_sq = float(np.sum(w**2)) + 1e-12
     freqs = np.fft.rfftfreq(n_samples, d=dt)
 
-    def get_order_amp(f_target, bw=1.5):
+    vib_power_spec = np.zeros_like(freqs, dtype=np.float64)
+    for sig in (dyn_x, dyn_y, dyn_z):
+        X_w = np.fft.rfft(sig * w)
+        vib_power_spec += np.abs(X_w)**2
+
+    fft_vals = np.sqrt(vib_power_spec / sum_w_sq)
+
+    def get_order_energy(f_target, bw=1.5):
         mask = (freqs >= max(0.5, f_target - bw)) & (freqs <= f_target + bw)
-        return float(np.max(fft_vals[mask])) if np.any(mask) else 0.0
+        return float(np.sum(vib_power_spec[mask])) if np.any(mask) else 0.0
 
-    amp_1x = get_order_amp(f0)
-    amp_2x = get_order_amp(2.0 * f0)
-    amp_3x = get_order_amp(3.0 * f0)
+    tot_energy = float(np.sum(vib_power_spec)) + 1e-12
+    e_1x_pct = (get_order_energy(f0) / tot_energy) * 100.0
+    e_2x_pct = (get_order_energy(2.0 * f0) / tot_energy) * 100.0
+    e_3x_pct = (get_order_energy(3.0 * f0) / tot_energy) * 100.0
 
-    tot_energy = float(np.sum(fft_vals)) + 1e-12
-    e_1x_pct = (amp_1x / tot_energy) * 100.0
-    e_2x_pct = (amp_2x / tot_energy) * 100.0
-    e_3x_pct = (amp_3x / tot_energy) * 100.0
-
-    # ISO 10816/20816 Vibration Velocity RMS (mm/s)
-    # V(f) = (A(f) * 9806.65) / (2 * pi * f) for f in [10, 200] Hz
+    # True ISO 10816/20816 Vibration Velocity RMS (mm/s) via Parseval Integration across [10, 200] Hz
     iso_band = (freqs >= 10.0) & (freqs <= min(200.0, fs / 2.0))
     if np.any(iso_band):
-        safe_f = freqs[iso_band]
-        v_spec = (fft_vals[iso_band] * 9806.65) / (2.0 * np.pi * safe_f)
-        v_rms_mms = float(np.sqrt(np.sum(v_spec**2) / 2.0))
+        safe_f = freqs[iso_band].copy()
+        safe_f[safe_f == 0] = 1.0
+        scale = np.full_like(safe_f, 2.0)
+        v_spec = (np.sqrt(vib_power_spec[iso_band]) * 9806.65) / (2.0 * np.pi * safe_f)
+        v_rms_mms = float(np.sqrt(np.sum(scale * (v_spec**2)) / (n_samples * sum_w_sq)))
     else:
         v_rms_mms = 0.0
 
@@ -101,9 +108,9 @@ def compute_spectral_metrics(t_s: np.ndarray, dyn_mag: np.ndarray, rpm_arr: np.n
         "crest_factor": crest,
         "kurtosis": kurtosis,
         "v_rms_mms": v_rms_mms,
-        "amp_1x": amp_1x,
-        "amp_2x": amp_2x,
-        "amp_3x": amp_3x,
+        "amp_1x": float(np.sqrt(get_order_energy(f0) / sum_w_sq)),
+        "amp_2x": float(np.sqrt(get_order_energy(2.0 * f0) / sum_w_sq)),
+        "amp_3x": float(np.sqrt(get_order_energy(3.0 * f0) / sum_w_sq)),
         "e_1x_pct": e_1x_pct,
         "e_2x_pct": e_2x_pct,
         "e_3x_pct": e_3x_pct,
@@ -199,11 +206,29 @@ def generate_comparison_plots(h_res, d_res, dist_res=None):
         t_d = dist_res["t_s"][:n_dist]
         v_d = dist_res["dyn_mag"][:n_dist]
 
-        # Simulating acoustic spikes vs flat vibration
-        ac_spike = 0.015 + 0.08 * np.exp(-0.5 * ((t_d - 0.75) / 0.15)**2) + 0.07 * np.exp(-0.5 * ((t_d - 1.25) / 0.12)**2)
+        # Extract real acoustic energy envelope from recorded WAV file
+        wav_dist_path = os.path.join(EXP_DIR, "motor_disturbance_audio.wav")
+        ac_label = "Microphone Acoustic Energy (Raw Sensor Ingestion)"
+        ac_data = np.zeros_like(v_d)
 
-        ax_d1.plot(t_d, ac_spike, color="#ffaa00", lw=1.5, label="Microphone Acoustic Amplitude (External Noise Burst: Handclap / Speech)")
-        ax_d1.plot(t_d, v_d, color=c_healthy, lw=1.5, label="Chassis Vibration $a_{dyn}$ (Remains Smooth in Zone A: < 0.05g)")
+        if os.path.exists(wav_dist_path):
+            try:
+                from scipy.io import wavfile
+                fs_w, w_samples = wavfile.read(wav_dist_path)
+                if w_samples.ndim > 1:
+                    ch0 = w_samples[:, 0].astype(np.float32) / 32768.0
+                else:
+                    ch0 = w_samples.astype(np.float32) / 32768.0
+
+                # Compute RMS envelope across matching time window
+                step = max(1, len(ch0) // len(t_d))
+                ac_data = np.abs(ch0[:len(t_d) * step:step][:len(t_d)])
+                ac_label = "Microphone Acoustic Amplitude (Recorded from motor_disturbance_audio.wav)"
+            except Exception:
+                ac_data = np.zeros_like(v_d)
+
+        ax_d1.plot(t_d, ac_data, color="#ffaa00", lw=1.5, label=ac_label)
+        ax_d1.plot(t_d, v_d, color=c_healthy, lw=1.5, label="Chassis Dynamic Vibration $a_{dyn}$ (Nominal < 0.15g)")
         ax_d1.set_title("Minor Project Thesis Proof (PDF Page 13): Acoustic Disturbance != Mechanical Fault", fontsize=11, color="#ffffff", pad=8)
         ax_d1.set_ylabel("Normalized Energy", fontsize=9, color="#94a3b8")
         ax_d1.grid(True, color=c_grid, linestyle=":", alpha=0.6)
@@ -307,8 +332,8 @@ def main():
     dist_data = load_experiment_csv(dist_csv) if os.path.exists(dist_csv) else None
 
     print("[*] Computing rotational order spectra and ISO velocity metrics...")
-    h_m = compute_spectral_metrics(h_data["t_s"], h_data["dyn_mag"], h_data["rpm"])
-    d_m = compute_spectral_metrics(d_data["t_s"], d_data["dyn_mag"], d_data["rpm"])
+    h_m = compute_spectral_metrics(h_data["t_s"], h_data["ax"], h_data["ay"], h_data["az"], h_data["dyn_mag"], h_data["rpm"])
+    d_m = compute_spectral_metrics(d_data["t_s"], d_data["ax"], d_data["ay"], d_data["az"], d_data["dyn_mag"], d_data["rpm"])
     h_data["metrics"] = h_m
     d_data["metrics"] = d_m
 

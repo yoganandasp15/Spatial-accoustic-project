@@ -1,31 +1,34 @@
 @echo off
-title Calibrate 4-Microphone INMP441 Acoustic Array (Ground Truth)
-color 0D
-echo =====================================================================
-echo    PHYSICAL 4-MICROPHONE ACOUSTIC LOCALIZATION CALIBRATOR
-echo    Tests Array Accuracy Across Ground Truth Angles: 0, ±30, ±45 deg
-echo =====================================================================
+@chcp 65001 >nul
+title Physical 4-Mic Array Ground Truth Acoustic Calibration
+color 0B
+cls
+echo ╔══════════════════════════════════════════════════════════════════════════════╗
+echo ║         PHYSICAL 4-MIC ARRAY GROUND TRUTH ACOUSTIC CALIBRATION               ║
+echo ║         Measuring SRP-PHAT Angular Precision Across 0°, ±30°, ±45°           ║
+echo ╚══════════════════════════════════════════════════════════════════════════════╝
 echo.
-echo Starting acoustic localization benchmark...
+echo [INSTRUCTION] Place acoustic test tone/speaker at marked angles relative to array.
+echo               Close any open radar GUI (COM8 will be used exclusively).
 echo.
 
 cd /d "%~dp0"
-set PYTHONUNBUFFERED=1
-set PYTHON_BIN=C:\Python314\python.exe
-if not exist "%PYTHON_BIN%" set PYTHON_BIN=python
+set "PYTHONUNBUFFERED=1"
+set "PYTHON_BIN=C:\Python314\python.exe"
+if not exist "%PYTHON_BIN%" set "PYTHON_BIN=python"
 
-"%PYTHON_BIN%" tools\calibrate_physical_array.py --angles 0 30 -30 45 -45 --port COM8
+"%PYTHON_BIN%" tools\calibrate_physical_array.py --port COM8 --baud 921600
 if errorlevel 1 (
     echo.
-    echo [ERROR] Calibration exited with error code %ERRORLEVEL%
+    echo ════════════════════════════════════════════════════════════════════════════
+    echo [ERROR] Calibration aborted or failed with exit code %ERRORLEVEL%.
+    echo ════════════════════════════════════════════════════════════════════════════
     pause
 ) else (
     echo.
-    echo =====================================================================
-    echo [SUCCESS] Physical Acoustic Benchmark Complete!
-    echo   - Plot: docs\evidence\physical_acoustic_localization_benchmark.png
-    echo   - JSON: stage2_acoustic_localization\evidence\physical_acoustic_calibration.json
-    echo =====================================================================
+    echo ════════════════════════════════════════════════════════════════════════════
+    echo [SUCCESS] Physical array calibration verified and saved!
+    echo ════════════════════════════════════════════════════════════════════════════
     echo.
     pause
 )
