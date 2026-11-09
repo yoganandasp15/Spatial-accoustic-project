@@ -3,10 +3,10 @@
 title Record Acoustic Disturbance Rejection Experiment (10 Seconds)
 color 0B
 cls
-echo ╔══════════════════════════════════════════════════════════════════════════════╗
-echo ║         SPATIAL MULTIMODAL MOTOR RECORDER: ACOUSTIC DISTURBANCE TEST         ║
-echo ║         Proves Environmental Acoustic Noise != Internal Mechanical Fault     ║
-echo ╚══════════════════════════════════════════════════════════════════════════════╝
+echo ================================================================================
+echo          SPATIAL MULTIMODAL MOTOR RECORDER: ACOUSTIC DISTURBANCE TEST
+echo          Proves Environmental Acoustic Noise != Internal Mechanical Fault
+echo ================================================================================
 echo.
 echo [INSTRUCTION] Run healthy DC motor while introducing external noise (clap/speech).
 echo               Close any open radar GUI (COM8 will be used exclusively).
@@ -20,15 +20,15 @@ if not exist "%PYTHON_BIN%" set "PYTHON_BIN=python"
 "%PYTHON_BIN%" tools\record_motor_experiment.py --mode disturbance --duration 10.0 --port COM8
 if errorlevel 1 (
     echo.
-    echo ════════════════════════════════════════════════════════════════════════════
+    echo ================================================================================
     echo [ERROR] Acquisition aborted or failed with exit code %ERRORLEVEL%.
-    echo ════════════════════════════════════════════════════════════════════════════
+    echo ================================================================================
     pause
 ) else (
     echo.
-    echo ════════════════════════════════════════════════════════════════════════════
+    echo ================================================================================
     echo [SUCCESS] Disturbance run recorded to data\experiments\motor_disturbance_run.csv!
-    echo ════════════════════════════════════════════════════════════════════════════
+    echo ================================================================================
     echo.
     pause
 )

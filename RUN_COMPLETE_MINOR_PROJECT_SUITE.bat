@@ -5,21 +5,21 @@ color 0B
 
 :MENU
 cls
-echo ╔══════════════════════════════════════════════════════════════════════════════╗
-echo ║    SPATIAL MULTIMODAL EDGE-AI FOR ROTATING MACHINERY (MINOR PROJECT SUITE)   ║
-echo ║    4-Mic ULA Array + ADXL345 Vibration + FC-03 Tachometer + Multimodal Fusion║
-echo ╚══════════════════════════════════════════════════════════════════════════════╝
+echo ================================================================================
+echo     SPATIAL MULTIMODAL EDGE-AI FOR ROTATING MACHINERY (MINOR PROJECT SUITE)
+echo     4-Mic ULA Array + ADXL345 Vibration + FC-03 Tachometer + Multimodal Fusion
+echo ================================================================================
 echo.
 echo    [1] Launch Live Real-Time Radar GUI (Acoustic Camera + Motor Diagnostics)
 echo    [2] Record HEALTHY Motor Run (10s @ 400Hz Vibration + Tach + Audio)
 echo    [3] Record DEFECTIVE Motor Run (10s @ 400Hz Vibration + Tach + Audio)
 echo    [4] Record ACOUSTIC DISTURBANCE Test (Proves Acoustic Noise != Motor Fault)
-echo    [5] Compare Motor Runs & Generate Final Academic Report + Figures
-echo    [6] Calibrate 4-Mic Array Accuracy (0°, ±30°, ±45° Ground Truth)
+echo    [5] Compare Motor Runs and Generate Final Academic Report + Figures
+echo    [6] Calibrate 4-Mic Array Accuracy (0 deg, +-30 deg, +-45 deg Ground Truth)
 echo    [7] Run Complete Automated Test Suite (55 Tests Across All 4 Stages)
 echo    [8] Exit Suite
 echo.
-echo ────────────────────────────────────────────────────────────────────────────────
+echo --------------------------------------------------------------------------------
 set /p M="Select an option (1-8): "
 
 if "%M%"=="1" (

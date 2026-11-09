@@ -4,10 +4,10 @@ title Spatial Multimodal Edge-AI -- Automated Test Suite
 color 0B
 setlocal
 cls
-echo ╔══════════════════════════════════════════════════════════════════════════════╗
-echo ║         SPATIAL MULTIMODAL EDGE-AI -- COMPLETE AUTOMATED TEST SUITE          ║
-echo ║   55 Unit & Adversarial Tests across DSP, Multimodal, Firmware, & Physics    ║
-echo ╚══════════════════════════════════════════════════════════════════════════════╝
+echo ================================================================================
+echo          SPATIAL MULTIMODAL EDGE-AI -- COMPLETE AUTOMATED TEST SUITE
+echo    55 Unit and Adversarial Tests across DSP, Multimodal, Firmware, and Physics
+echo ================================================================================
 echo.
 
 cd /d "%~dp0"
@@ -23,14 +23,14 @@ echo.
 
 if not errorlevel 1 (
     echo.
-    echo ════════════════════════════════════════════════════════════════════════════
+    echo ================================================================================
     echo [PASS] All 55 test assertions passed cleanly! Zero regressions detected.
-    echo ════════════════════════════════════════════════════════════════════════════
+    echo ================================================================================
 ) else (
     echo.
-    echo ════════════════════════════════════════════════════════════════════════════
-    echo [FAIL] Test suite encountered assertions errors. Check log output above.
-    echo ════════════════════════════════════════════════════════════════════════════
+    echo ================================================================================
+    echo [FAIL] Test suite encountered assertion errors. Check log output above.
+    echo ================================================================================
 )
 
 echo.
