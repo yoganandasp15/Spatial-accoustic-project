@@ -61,8 +61,8 @@ Y_MIN, Y_MAX =  0.2, 3.5   # Range in front of array (meters)
 GRID_X = 51
 GRID_Y = 45
 
-# Acoustic Filter Bounds (Hz) - DC Motor & Voice Bandwidth (Rejects DC drift & sub-rumble)
-FREQ_MIN = 80.0
+# Acoustic Filter Bounds (Hz) - DC Motor & Voice Bandwidth (Admit rotational fundamentals & harmonics)
+FREQ_MIN = 45.0
 FREQ_MAX = 5500.0
 
 # Fixed palette: blue/cyan/green/yellow/orange/red. Relative digital level, not dB SPL.
@@ -407,7 +407,9 @@ class SRPPhatEngine:
         d_ij_m: float,
         gamma: float = 0.70,
         interp_factor: int = 16,
-        min_signal_rms: float = 0.0015
+        min_signal_rms: float = 0.0015,
+        gain_i: float = 1.0,
+        gain_j: float = 1.0
     ) -> Tuple[float, float, np.ndarray, np.ndarray, bool]:
         """
         Computes super-resolution sinc GCC-PHAT between microphone pair (i, j).
@@ -424,8 +426,9 @@ class SRPPhatEngine:
         dummy_lags = np.linspace(-tau_max, tau_max, 3)
 
         # 1. Absolute Energy Gating: Reject weak background noise before normalization
-        rms_i = float(np.sqrt(np.mean(sig_i ** 2)))
-        rms_j = float(np.sqrt(np.mean(sig_j ** 2)))
+        # Evaluated on sensitivity-calibrated effective RMS to prevent discarding weak microphones (e.g. MIC2)
+        rms_i = float(np.sqrt(np.mean(sig_i ** 2))) * gain_i
+        rms_j = float(np.sqrt(np.mean(sig_j ** 2))) * gain_j
         if rms_i < min_signal_rms or rms_j < min_signal_rms:
             return 0.0, 0.0, np.zeros(3), dummy_lags, False
 
@@ -433,8 +436,8 @@ class SRPPhatEngine:
         si = (sig_i - np.mean(sig_i)) * w
         sj = (sig_j - np.mean(sig_j)) * w
 
-        std_i = float(np.std(si))
-        std_j = float(np.std(sj))
+        std_i = float(np.std(si)) * gain_i
+        std_j = float(np.std(sj)) * gain_j
         if std_i < min_signal_rms or std_j < min_signal_rms:
             return 0.0, 0.0, np.zeros(3), dummy_lags, False
 
@@ -539,21 +542,23 @@ class SRPPhatEngine:
         gains = calib_gains if calib_gains is not None else PRELIM_MIC_SENSITIVITY_GAINS[:num_mics]
         calib_ch_rms = [ch_rms[m] * float(gains[m]) if m < len(gains) else ch_rms[m] for m in range(num_mics)]
         avg_rms = float(np.mean(ch_rms)) if ch_rms else 0.0
+        avg_calib_rms = float(np.mean(calib_ch_rms)) if calib_ch_rms else avg_rms
 
         ch_status = []
         for m in range(num_mics):
+            effective_rms = calib_ch_rms[m]
             if ch_peak[m] > 0.98:
                 ch_status.append("CLIPPED")
             elif ch_rms[m] < 1e-4 and avg_rms > 0.003:
                 ch_status.append("DEAD")
-            elif ch_rms[m] < min_active_rms:
+            elif effective_rms < min_active_rms:
                 ch_status.append("QUIET")
             else:
                 ch_status.append("ACTIVE")
 
-        # Silence Gate: If overall acoustic energy is below physical threshold,
+        # Silence Gate: If overall physical acoustic energy (calibrated) is below physical threshold,
         # return an explicit QUIET state immediately. DO NOT compute SRP on noise!
-        if avg_rms < min_active_rms or sum(st != "DEAD" for st in ch_status) < 2:
+        if avg_calib_rms < min_active_rms or sum(st != "DEAD" for st in ch_status) < 2:
             return (
                 0.0,
                 0.0,
@@ -604,7 +609,9 @@ class SRPPhatEngine:
             d_ij = abs(d_x) if abs(d_x) > 1e-4 else geometry.baseline_m
 
             best_tau, prom, c_phys, l_phys, is_valid = cls.gcc_phat_pair(
-                sig_i, sig_j, fs, d_ij, min_signal_rms=min_active_rms * 0.50
+                sig_i, sig_j, fs, d_ij, min_signal_rms=min_active_rms * 0.40,
+                gain_i=float(gains[i]) if i < len(gains) else 1.0,
+                gain_j=float(gains[j]) if j < len(gains) else 1.0
             )
             pair_prominences.append(prom)
 
@@ -2472,12 +2479,14 @@ class AcousticRadarApp:
             # veto SRP's independent spatial-coherence and GCC-PHAT source validation.
             is_active_sound, self.noise_floor, attack_thresh = self.vad.process_frame(avg_rms, now)
 
-            min_srp_rms = 0.0020
+            # Adaptive Physical SRP Energy Gate:
+            # Rejects quiescent room floor while allowing quiet motor acoustic emissions
+            min_srp_rms = max(0.0008, min(0.0022, self.noise_floor * 1.25))
             best_bearing, composite_prom, srp_angles, srp_norm, raw_2d_heatmap, side_metrics = (
                 SRPPhatEngine.compute_srp_frame(raw_frame, fs, self.geometry, min_active_rms=min_srp_rms, calib_gains=PRELIM_MIC_SENSITIVITY_GAINS)
             )
 
-            is_audio_energy_present = bool(avg_rms >= min_srp_rms)
+            is_audio_energy_present = bool(avg_calib_rms >= min_srp_rms)
             is_source_valid = bool(side_metrics.get("is_valid", False))
             if is_source_valid:
                 self.vad.note_coherent_source(now)
