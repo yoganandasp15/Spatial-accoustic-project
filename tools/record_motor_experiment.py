@@ -57,6 +57,53 @@ except ImportError:
     SERIAL_AVAILABLE = False
 
 
+def find_esp32_port(requested_port: str = "auto") -> str:
+    """
+    Intelligently detects the active ESP32 COM port.
+    If a specific non-default port (e.g. COM_NONEXISTENT_99) is passed, respects it so unit tests fail cleanly.
+    Otherwise scans for CP210x, CH340, FTDI, or ESP32 USB VID/PID hardware descriptors,
+    filtering out virtual Bluetooth and ACPI motherboard serial ports.
+    """
+    if not SERIAL_AVAILABLE:
+        return requested_port if requested_port != "auto" else "COM8"
+
+    ports = list(serial.tools.list_ports.comports())
+    if not ports:
+        return requested_port if requested_port != "auto" else "COM8"
+
+    # If an explicit custom port was passed (e.g. for testing)
+    if requested_port != "auto":
+        for p in ports:
+            if p.device.upper() == requested_port.upper():
+                return p.device
+        # If requested_port was explicitly non-COM8 (e.g. COM_NONEXISTENT_99), return it so caller fails cleanly
+        if requested_port.upper() != "COM8":
+            return requested_port
+
+    # Scan for CP210x (10c4:ea60), CH340 (1a86:7523), FTDI (0403:6001), or Espressif ESP32 (303a:)
+    for p in ports:
+        h = ((p.hwid or "") + " " + (p.description or "")).lower()
+        if "bthenum" in h or "bluetooth" in h or "acpi" in h or "pnp0501" in h:
+            continue
+        if any(k in h for k in ["10c4:ea60", "cp210", "1a86:7523", "ch340", "0403:6001", "ftdi", "303a:", "esp32"]):
+            return p.device
+
+    # Match any genuine USB serial device
+    for p in ports:
+        h = ((p.hwid or "") + " " + (p.description or "")).lower()
+        if "bthenum" in h or "bluetooth" in h or "acpi" in h or "pnp0501" in h:
+            continue
+        if "usb" in h:
+            return p.device
+
+    # Fallback to COM8 if present, otherwise default COM8
+    for p in ports:
+        if p.device.upper() == "COM8":
+            return p.device
+
+    return "COM8"
+
+
 def compute_checksum(data: bytes) -> int:
     """16-bit XOR rolling checksum matching ESP32 firmware."""
     chk = 0x55AA
@@ -74,7 +121,7 @@ class MotorExperimentRecorder:
         fault_type: str = "none",
         disturbance_desc: str = "",
         duration: float = 30.0,
-        port: str = "COM8",
+        port: str = "auto",
         baudrate: int = 921600,
         supply_voltage: Optional[float] = None,
         pulses_per_rev: int = 1,
@@ -90,7 +137,8 @@ class MotorExperimentRecorder:
         self.fault_type = fault_type.lower().strip()
         self.disturbance_desc = disturbance_desc.strip()
         self.duration = float(duration)
-        self.port = port
+        self.requested_port = port
+        self.port = find_esp32_port(port)
         self.baudrate = baudrate
         self.supply_voltage = supply_voltage
         self.pulses_per_rev = max(1, int(pulses_per_rev))
@@ -776,7 +824,7 @@ def main():
                         default=None, help="Specific verified mechanical fault type (default: 'unknown' for defective, 'none' for healthy)")
     parser.add_argument("--disturbance-desc", type=str, default="", help="Description of acoustic disturbance (e.g. loudspeaker, clap)")
     parser.add_argument("--duration", type=float, default=30.0, help="Recording duration in seconds (default: 30.0s)")
-    parser.add_argument("--port", type=str, default="COM8", help="ESP32 serial port (default: COM8)")
+    parser.add_argument("--port", type=str, default="auto", help="ESP32 serial port (default: auto, detects active CP210x/CH340/COM8)")
     parser.add_argument("--baud", type=int, default=921600, help="ESP32 baudrate (default: 921600)")
     parser.add_argument("--supply-voltage", type=float, default=None, help="Motor DC power supply voltage (V)")
     parser.add_argument("--pulses-per-rev", "--ppr", type=int, default=1, help="Tachometer optical pulses per revolution")

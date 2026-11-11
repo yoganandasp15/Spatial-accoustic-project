@@ -30,11 +30,17 @@ if not defined PROJECT_DIR (
 )
 
 set "SKETCH_DIR=%PROJECT_DIR%\stage3_esp32_firmware\ESP32_Spatial_Acoustic_Radar_Firmware"
+
 set "PORT=COM8"
+if exist "%PROJECT_DIR%\tools\find_port.py" (
+    for /f "delims=" %%P in ('python "%PROJECT_DIR%\tools\find_port.py" 2^>nul') do (
+        set "PORT=%%P"
+    )
+)
 if not "%~1"=="" set "PORT=%~1"
 
 echo [*] Repository Root   : %PROJECT_DIR%
-echo [*] Target Serial Port : %PORT%
+echo [*] Target Serial Port : %PORT% (Auto-Detected)
 echo [*] Sketch Directory   : %SKETCH_DIR%
 echo.
 echo [*] Compiling and uploading firmware to %PORT%...

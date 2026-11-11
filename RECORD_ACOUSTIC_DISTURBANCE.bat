@@ -1,16 +1,15 @@
 @echo off
 @chcp 65001 >nul
-title Record Healthy Motor + Acoustic Disturbance (30 Seconds)
+title Record Acoustic Disturbance Control Experiment (30 Seconds)
 color 0E
 cls
 echo ================================================================================
-echo          SPATIAL MULTIMODAL MOTOR RECORDER: HEALTHY + DISTURBANCE (30s)
-echo          Proves Environmental Acoustic Noise != Internal Mechanical Fault
+echo          SPATIAL MULTIMODAL MOTOR RECORDER: ACOUSTIC DISTURBANCE (30s)
+echo          400Hz ADXL345 Vibration (+/-2g) + FC-03 Tachometer + 4-Mic Audio
 echo ================================================================================
 echo.
-echo [INSTRUCTION] Run healthy DC motor (motor_A) while introducing external sound
-echo               (phone speech/music/claps) 30-50cm from the microphone array.
-echo               Close any open radar GUI (COM8 will be used exclusively).
+echo [INSTRUCTION] Run healthy DC motor (motor_A) while introducing external noise:
+echo               (e.g., play loud audio from phone, clap, or speak nearby).
 echo               Duration: 30.0s (Captures ~12,000 vibration and ~300,000 audio samples).
 echo.
 
@@ -33,9 +32,24 @@ if not defined PROJECT_DIR (
 cd /d "%PROJECT_DIR%"
 set "PYTHONUNBUFFERED=1"
 set "PYTHON_BIN=C:\Python314\python.exe"
+if not exist "%PYTHON_BIN%" (
+    for /f "delims=" %%I in ('where python 2^>nul') do (
+        if not defined PYTHON_BIN set "PYTHON_BIN=%%I"
+    )
+)
 if not exist "%PYTHON_BIN%" set "PYTHON_BIN=python"
 
-"%PYTHON_BIN%" tools\record_motor_experiment.py --motor-id motor_A --health-label healthy --environment disturbance --fault-type none --disturbance-desc "ambient acoustic noise" --duration 30.0 --port COM8 %*
+set "PORT=COM8"
+if exist "tools\find_port.py" (
+    for /f "delims=" %%P in ('"%PYTHON_BIN%" "tools\find_port.py" 2^>nul') do (
+        set "PORT=%%P"
+    )
+)
+
+echo [*] Target Serial Port : %PORT% (Auto-Detected)
+echo.
+
+"%PYTHON_BIN%" tools\record_motor_experiment.py --motor-id motor_A --health-label healthy --environment disturbance --fault-type none --disturbance-desc "External acoustic disturbance" --duration 30.0 --port %PORT% %*
 if errorlevel 1 (
     echo.
     echo ================================================================================
@@ -45,7 +59,7 @@ if errorlevel 1 (
 ) else (
     echo.
     echo ================================================================================
-    echo [SUCCESS] Disturbance run recorded to data\dataset\ and registered in manifest!
+    echo [SUCCESS] Acoustic Disturbance run recorded to data\dataset\ and registered!
     echo ================================================================================
     echo.
     pause

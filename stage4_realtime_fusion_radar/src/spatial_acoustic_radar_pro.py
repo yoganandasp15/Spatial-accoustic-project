@@ -1548,6 +1548,8 @@ class ESP32MultimodalSource(AudioSourceBase):
                     adxl_hw_str = "ADXL345: ONLINE (400Hz FIFO)" if adxl_hw_ok else "ADXL345: OFFLINE / ABSENT"
 
                     self.telemetry.update({
+                        "port": str(port_str),
+                        "baud": str(baud_str),
                         "ax_g": latest_ax,
                         "ay_g": latest_ay,
                         "az_g": latest_az,
@@ -2925,6 +2927,7 @@ class AcousticRadarApp:
                 self.where_box_text.set_color(where_col)
                 self.where_box_text.get_bbox_patch().set_edgecolor(where_col)
 
+            port_label = str(telemetry.get("port", "COM8"))
             hud_lines = [
                 f" [HEALTH]   [{h_bar}] {h_score_str} ({h_status})",
                 f" [BASELINE] {base_str[:34]}",
@@ -2932,7 +2935,7 @@ class AcousticRadarApp:
                 f" [S2: VIB]  {adxl_short} | a_dyn:{dyn_vib_g:.3f}g | {motor_diag.get('v_rms_mms', 0.0):.2f}mm/s",
                 f" [S3: ACOU] Kurtosis:{motor_diag['kurtosis']:5.2f} | Crest:{motor_diag['crest_factor']:4.1f} | VAD:{vad_short}",
                 f" [S4: ORDR] 1X:{e1:4.1f}% | 2X:{e2:4.1f}% | 3X:{e3:4.1f}%",
-                f" [SERIAL]   COM8 @ 921.6k | OK:{telemetry.get('packets_valid', 0)} Drop:{telemetry.get('dropped_packets', 0)} Cal:{calib_short}",
+                f" [SERIAL]   {port_label} @ 921.6k | OK:{telemetry.get('packets_valid', 0)} Drop:{telemetry.get('dropped_packets', 0)} Cal:{calib_short}",
                 " --------------------------------------------",
                 " KEYS: [B] Lock Base [C] Clear [P] PPR [T] Demo",
                 "       [1] Laptop [2] ESP32 [K] Cal [I] Flip"

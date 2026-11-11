@@ -9,7 +9,7 @@ echo          400Hz ADXL345 Vibration (+/-2g) + FC-03 Tachometer + 4-Mic Audio
 echo ================================================================================
 echo.
 echo [INSTRUCTION] Ensure healthy DC motor (motor_A) is securely mounted and running.
-echo               Close any open radar GUI (COM8 will be used exclusively).
+echo               Close any open radar GUI (Serial port will be used exclusively).
 echo               Duration: 30.0s (Captures ~12,000 vibration and ~300,000 audio samples).
 echo.
 
@@ -32,9 +32,24 @@ if not defined PROJECT_DIR (
 cd /d "%PROJECT_DIR%"
 set "PYTHONUNBUFFERED=1"
 set "PYTHON_BIN=C:\Python314\python.exe"
+if not exist "%PYTHON_BIN%" (
+    for /f "delims=" %%I in ('where python 2^>nul') do (
+        if not defined PYTHON_BIN set "PYTHON_BIN=%%I"
+    )
+)
 if not exist "%PYTHON_BIN%" set "PYTHON_BIN=python"
 
-"%PYTHON_BIN%" tools\record_motor_experiment.py --motor-id motor_A --health-label healthy --environment quiet --fault-type none --duration 30.0 --port COM8 %*
+set "PORT=COM8"
+if exist "tools\find_port.py" (
+    for /f "delims=" %%P in ('"%PYTHON_BIN%" "tools\find_port.py" 2^>nul') do (
+        set "PORT=%%P"
+    )
+)
+
+echo [*] Target Serial Port : %PORT% (Auto-Detected)
+echo.
+
+"%PYTHON_BIN%" tools\record_motor_experiment.py --motor-id motor_A --health-label healthy --environment quiet --fault-type none --duration 30.0 --port %PORT% %*
 if errorlevel 1 (
     echo.
     echo ================================================================================

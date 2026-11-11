@@ -62,20 +62,28 @@ if exist "fix_radar_ui.py" (
     "%PYTHON_BIN%" "fix_radar_ui.py" >nul 2>&1
 )
 
+:: 4. Auto-detect active ESP32 COM port
+set "DETECTED_PORT=COM8"
+if exist "tools\find_port.py" (
+    for /f "delims=" %%P in ('"%PYTHON_BIN%" "tools\find_port.py" 2^>nul') do (
+        set "DETECTED_PORT=%%P"
+    )
+)
+
 echo  +----------------------------------------------------------------------------+
 echo  ^| SYSTEM TELEMETRY CONFIGURATION                                             ^|
 echo  +----------------------------------------------------------------------------+
 echo    Workspace Root : %CD%
 echo    Python Engine  : %PYTHON_BIN%
-echo    ESP32 Link     : COM8 @ 921,600 Baud (Type 0x05 Binary DMA + 400Hz FIFO)
+echo    ESP32 Link     : %DETECTED_PORT% @ 921,600 Baud (Auto-Detected Type 0x05 Streamer)
 echo    Array Geometry : 4-Mic INMP441 ULA (Pitch: 20.32 mm, Span: 60.96 mm)
 echo  +----------------------------------------------------------------------------+
 echo.
 
-:: 4. Scan for active COM ports
+:: 5. Scan and display all active COM ports
 powershell -NoProfile -Command "$ports = [System.IO.Ports.SerialPort]::GetPortNames(); if ($ports) { Write-Host ('  [+] Active Serial Ports Detected : ' + ($ports -join ', ')) -ForegroundColor Green } else { Write-Host '  [!] No COM Ports Detected        : Launching in Standby / Demo Mode (Press T)' -ForegroundColor Yellow }"
 
-:: 5. Verify core Python dependencies
+:: 6. Verify core Python dependencies
 "%PYTHON_BIN%" -c "import numpy, scipy, matplotlib, sounddevice" >nul 2>&1
 if errorlevel 1 (
     color 0C
@@ -96,10 +104,10 @@ echo  ^|  [T] Cycle Motor Fault Demos   [I] Flip Mic Polarity   [K] Phase Calib 
 echo  ^|  [1] Laptop Internal Mic       [2] ESP32 4-Mic Array   [Q] Quit Radar      ^|
 echo  +----------------------------------------------------------------------------+
 echo.
-echo  [+] Launching Spatial Multimodal Acoustic Radar Pro HUD...
+echo  [+] Launching Spatial Multimodal Acoustic Radar Pro HUD on %DETECTED_PORT%...
 echo.
 
-"%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py"
+"%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py" %*
 
 if errorlevel 1 (
     color 0C

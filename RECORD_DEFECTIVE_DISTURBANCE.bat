@@ -1,16 +1,15 @@
 @echo off
 @chcp 65001 >nul
-title Record Defective Motor + Acoustic Disturbance (30 Seconds)
-color 0D
+title Record Defective Motor + Disturbance Experiment (30 Seconds)
+color 0C
 cls
 echo ================================================================================
-echo          SPATIAL MULTIMODAL MOTOR RECORDER: DEFECTIVE + DISTURBANCE (30s)
-echo          Verifies Defective State Persists During External Acoustic Noise
+echo    SPATIAL MULTIMODAL RECORDER: DEFECTIVE MOTOR + DISTURBANCE (30s)
+echo    400Hz ADXL345 Vibration (+/-2g) + FC-03 Tachometer + 4-Mic Audio
 echo ================================================================================
 echo.
-echo [INSTRUCTION] Run defective DC motor (motor_B) while introducing external sound
-echo               (phone speech/music/claps) 30-50cm from the microphone array.
-echo               Close any open radar GUI (COM8 will be used exclusively).
+echo [INSTRUCTION] Run defective DC motor (motor_B) with external acoustic noise:
+echo               (proves the AI separates real vibration faults from sound noise).
 echo               Duration: 30.0s (Captures ~12,000 vibration and ~300,000 audio samples).
 echo.
 
@@ -33,9 +32,24 @@ if not defined PROJECT_DIR (
 cd /d "%PROJECT_DIR%"
 set "PYTHONUNBUFFERED=1"
 set "PYTHON_BIN=C:\Python314\python.exe"
+if not exist "%PYTHON_BIN%" (
+    for /f "delims=" %%I in ('where python 2^>nul') do (
+        if not defined PYTHON_BIN set "PYTHON_BIN=%%I"
+    )
+)
 if not exist "%PYTHON_BIN%" set "PYTHON_BIN=python"
 
-"%PYTHON_BIN%" tools\record_motor_experiment.py --motor-id motor_B --health-label defective --environment disturbance --fault-type unknown --disturbance-desc "ambient acoustic noise" --duration 30.0 --port COM8 %*
+set "PORT=COM8"
+if exist "tools\find_port.py" (
+    for /f "delims=" %%P in ('"%PYTHON_BIN%" "tools\find_port.py" 2^>nul') do (
+        set "PORT=%%P"
+    )
+)
+
+echo [*] Target Serial Port : %PORT% (Auto-Detected)
+echo.
+
+"%PYTHON_BIN%" tools\record_motor_experiment.py --motor-id motor_B --health-label defective --environment disturbance --fault-type unknown --disturbance-desc "External acoustic noise with defective motor" --duration 30.0 --port %PORT% %*
 if errorlevel 1 (
     echo.
     echo ================================================================================
@@ -45,7 +59,7 @@ if errorlevel 1 (
 ) else (
     echo.
     echo ================================================================================
-    echo [SUCCESS] Defective disturbance run recorded to data\dataset\ and registered in manifest!
+    echo [SUCCESS] Defective + Disturbance run recorded to data\dataset\ and registered!
     echo ================================================================================
     echo.
     pause
