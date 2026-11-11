@@ -1,7 +1,26 @@
 @echo off
+setlocal EnableExtensions
 @chcp 65001 >nul
 title Spatial Multimodal Edge-AI Minor Project Master Suite
 color 0B
+
+set "PROJECT_DIR="
+if exist "%~dp0Launch_Spatial_Acoustic_Radar.bat" (
+    set "PROJECT_DIR=%~dp0"
+) else if exist "C:\Users\Yogi\Downloads\Spatial-accoustic-project\Launch_Spatial_Acoustic_Radar.bat" (
+    set "PROJECT_DIR=C:\Users\Yogi\Downloads\Spatial-accoustic-project"
+) else if exist "%USERPROFILE%\Downloads\Spatial-accoustic-project\Launch_Spatial_Acoustic_Radar.bat" (
+    set "PROJECT_DIR=%USERPROFILE%\Downloads\Spatial-accoustic-project"
+)
+
+if not defined PROJECT_DIR (
+    color 0C
+    echo [ERROR] Could not locate Spatial-accoustic-project repository.
+    pause
+    exit /b 1
+)
+
+cd /d "%PROJECT_DIR%"
 
 :MENU
 cls
@@ -16,7 +35,7 @@ echo    [3] Record DEFECTIVE Motor Run (10s @ 400Hz Vibration + Tach + Audio)
 echo    [4] Record ACOUSTIC DISTURBANCE Test (Proves Acoustic Noise != Motor Fault)
 echo    [5] Compare Motor Runs and Generate Final Academic Report + Figures
 echo    [6] Calibrate 4-Mic Array Accuracy (0 deg, +-30 deg, +-45 deg Ground Truth)
-echo    [7] Run Complete Automated Test Suite (55 Tests Across All 4 Stages)
+echo    [7] Run Complete Automated Test Suite (69 Tests Across All 4 Stages)
 echo    [8] Exit Suite
 echo.
 echo --------------------------------------------------------------------------------

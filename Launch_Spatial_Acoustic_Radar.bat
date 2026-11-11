@@ -107,7 +107,7 @@ echo.
 echo  [+] Launching Spatial Multimodal Acoustic Radar Pro HUD on %DETECTED_PORT%...
 echo.
 
-"%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py" %*
+"%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py" --port %DETECTED_PORT% %*
 
 if errorlevel 1 (
     color 0C

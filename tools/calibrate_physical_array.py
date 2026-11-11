@@ -37,8 +37,14 @@ os.makedirs(EVIDENCE_DIR, exist_ok=True)
 os.makedirs(STAGE2_DIR, exist_ok=True)
 
 
-def record_physical_audio(duration: float = 3.0, port: str = "COM8", baud: int = 921600):
-    """Attempts to record 4-channel audio from ESP32 on COM8; falls back cleanly if unpowered."""
+def record_physical_audio(duration: float = 3.0, port: str = "auto", baud: int = 921600):
+    """Attempts to record 4-channel audio from ESP32; falls back cleanly if unpowered."""
+    if port == "auto" or not port:
+        try:
+            from find_port import detect_port
+            port = detect_port()
+        except Exception:
+            port = "COM8"
     try:
         import serial
         ser = serial.Serial(port=port, baudrate=baud, timeout=0.25)
@@ -126,12 +132,19 @@ def simulate_known_angle_audio(target_angle_deg: float, duration: float = 3.0, f
     return out, fs
 
 
-def run_benchmark(test_angles: List[float], port: str = "COM8", baud: int = 921600, use_synthetic: bool = False):
+def run_benchmark(test_angles: List[float], port: str = "auto", baud: int = 921600, use_synthetic: bool = False):
+    if port == "auto" or not port:
+        try:
+            from find_port import detect_port
+            port = detect_port()
+        except Exception:
+            port = "COM8"
     print("=" * 75)
     print(" 4-MICROPHONE INMP441 PHYSICAL ACOUSTIC LOCALIZATION BENCHMARK")
     print("=" * 75)
     print(f" Array Geometry : 4-Mic Uniform Linear Array (ULA), Pitch: 20.32 mm (Span: 60.96 mm)")
     print(f" Target Angles  : {test_angles}")
+    print(f" Target Serial  : {port} @ {baud} Baud")
     print("=" * 75 + "\n")
 
     geom = PRESETS["ESP32_4MIC_LINEAR"]
@@ -261,7 +274,7 @@ def main():
     parser = argparse.ArgumentParser(description="Calibrate & Benchmark Physical 4-Mic Acoustic Array")
     parser.add_argument("--angles", nargs="+", type=float, default=[0.0, 30.0, -30.0, 45.0, -45.0],
                         help="List of test angles in degrees (default: 0 30 -30 45 -45)")
-    parser.add_argument("--port", type=str, default="COM8", help="Serial port (default: COM8)")
+    parser.add_argument("--port", type=str, default="auto", help="Serial port (default: auto)")
     parser.add_argument("--baud", type=int, default=921600, help="Serial baudrate (default: 921600)")
     parser.add_argument("--synthetic", action="store_true", help="Force synthetic simulation of physical array")
     args = parser.parse_args()

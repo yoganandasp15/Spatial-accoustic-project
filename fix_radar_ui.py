@@ -31,16 +31,19 @@ NEW_GET_EVIDENCE_TAG = '''    def _get_evidence_mode_tag(self) -> str:
             chk_err = telemetry.get("checksum_errors", 0)
             ch_active = telemetry.get("channels_active", 0)
             last_pkt = telemetry.get("last_packet_time", 0.0)
+            port_label = str(telemetry.get("port", getattr(self.current_source, "port", "ESP32")))
+            if port_label == "auto":
+                port_label = "ESP32"
 
             if is_alive and (time.time() - last_pkt < 1.5) and pkt_valid > 5:
                 if ch_active >= 4:
-                    return "LIVE HARDWARE: COM8 @ 921.6k | 4-MIC ULA + ADXL345 + FC-03 (CHK OK)"
+                    return f"LIVE HARDWARE: {port_label} @ 921.6k | 4-MIC ULA + ADXL345 + FC-03 (CHK OK)"
                 else:
-                    return f"LIVE HARDWARE: COM8 ({ch_active}/4 MICS ACTIVE | CHK OK)"
+                    return f"LIVE HARDWARE: {port_label} ({ch_active}/4 MICS ACTIVE | CHK OK)"
             elif is_alive and chk_err > 0:
                 return f"HARDWARE LINK WARNING ({chk_err} CHECKSUM ERRORS)"
             else:
-                return "ESP32 STANDBY / DISCONNECTED (Press 'T' for Demo)"
+                return f"ESP32 STANDBY / DISCONNECTED ({port_label}) (Press 'T' for Demo)"
         elif self.active_source_type == "SYNTHETIC":
             return "SYNTHETIC 4-CH ARRAY & MOTOR SIMULATION"
         elif self.active_source_type == "LAPTOP":
@@ -546,18 +549,19 @@ def apply_ui_fix():
                 self.where_box_text.set_color(where_col)
                 self.where_box_text.get_bbox_patch().set_edgecolor(where_col)
 
-            hud_lines = [
-                f" [HEALTH]   [{h_bar}] {h_score_str} ({h_status})",
-                f" [BASELINE] {base_str[:34]}",
-                f" [S1: TACH] {rpm:5.0f} RPM ({f0_str}) | Pulses:{pulses} (PPR:{self.pulses_per_rev})",
-                f" [S2: VIB]  {adxl_short} | a_dyn:{dyn_vib_g:.3f}g | {motor_diag.get('v_rms_mms', 0.0):.2f}mm/s",
-                f" [S3: ACOU] Kurtosis:{motor_diag['kurtosis']:5.2f} | Crest:{motor_diag['crest_factor']:4.1f} | VAD:{vad_short}",
-                f" [S4: ORDR] 1X:{e1:4.1f}% | 2X:{e2:4.1f}% | 3X:{e3:4.1f}%",
-                f" [SERIAL]   COM8 @ 921.6k | OK:{telemetry.get('packets_valid', 0)} Drop:{telemetry.get('dropped_packets', 0)} Cal:{calib_short}",
-                " --------------------------------------------",
-                " KEYS: [B] Lock Base [C] Clear [P] PPR [T] Demo",
-                "       [1] Laptop [2] ESP32 [K] Cal [I] Flip"
-            ]
+                port_label = str(telemetry.get("port", "COM8"))
+                hud_lines = [
+                    f" [HEALTH]   [{h_bar}] {h_score_str} ({h_status})",
+                    f" [BASELINE] {base_str[:34]}",
+                    f" [S1: TACH] {rpm:5.0f} RPM ({f0_str}) | Pulses:{pulses} (PPR:{self.pulses_per_rev})",
+                    f" [S2: VIB]  {adxl_short} | a_dyn:{dyn_vib_g:.3f}g | {motor_diag.get('v_rms_mms', 0.0):.2f}mm/s",
+                    f" [S3: ACOU] Kurtosis:{motor_diag['kurtosis']:5.2f} | Crest:{motor_diag['crest_factor']:4.1f} | VAD:{vad_short}",
+                    f" [S4: ORDR] 1X:{e1:4.1f}% | 2X:{e2:4.1f}% | 3X:{e3:4.1f}%",
+                    f" [SERIAL]   {port_label} @ 921.6k | OK:{telemetry.get('packets_valid', 0)} Drop:{telemetry.get('dropped_packets', 0)} Cal:{calib_short}",
+                    " --------------------------------------------",
+                    " KEYS: [B] Lock Base [C] Clear [P] PPR [T] Demo",
+                    "       [1] Laptop [2] ESP32 [K] Cal [I] Flip"
+                ]
             self.hud_text.set_text("\\n".join(hud_lines))'''
 
     text = text[:old_hud_start] + new_hud_section + text[old_hud_end:]

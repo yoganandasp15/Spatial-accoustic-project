@@ -1251,7 +1251,7 @@ class ESP32MultimodalSource(AudioSourceBase):
     + FC-03 tachometer at 921,600 baud using zero-copy binary DMA packets (packet type 0x05).
     """
 
-    def __init__(self, port: str = "COM8", baudrates: Tuple[int, ...] = (921600, 1152000, 115200)):
+    def __init__(self, port: str = "auto", baudrates: Tuple[int, ...] = (921600, 1152000, 115200)):
         self.port = port
         self.baudrates = baudrates
         self.fs = 10000.0
@@ -1287,6 +1287,7 @@ class ESP32MultimodalSource(AudioSourceBase):
             "channels_active": 0,
             "last_packet_time": 0.0,
             "num_vib_last": 0,
+            "port": port if port != "auto" else "COM8",
         }
         self.lock = threading.Lock()
         self.running = False
@@ -1312,19 +1313,44 @@ class ESP32MultimodalSource(AudioSourceBase):
 
     def _find_port(self) -> str:
         if not SERIAL_AVAILABLE:
+            return self.port if self.port and self.port != "auto" else "COM8"
+        # If user explicitly specified a port that isn't "auto", try that directly
+        if self.port and self.port.lower() != "auto":
             return self.port
-        ports = list(serial.tools.list_ports.comports())
-        for p in ports:
-            hwid = (p.hwid or "").lower()
-            desc = (p.description or "").lower()
-            if "10c4:ea60" in hwid or "cp210" in desc:
-                return p.device
-            if "1a86:7523" in hwid or "ch340" in desc:
-                return p.device
-        for p in ports:
-            if "com8" in p.device.lower():
-                return p.device
-        return self.port
+
+        # Try standalone hardware port detector
+        try:
+            tools_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "tools")
+            if tools_dir not in sys.path:
+                sys.path.insert(0, tools_dir)
+            import find_port
+            detected = find_port.detect_port()
+            if detected:
+                return detected
+        except Exception:
+            pass
+
+        # Robust in-situ detection with Bluetooth / ACPI rejection
+        try:
+            ports = list(serial.tools.list_ports.comports())
+            for p in ports:
+                h = ((p.hwid or "") + " " + (p.description or "")).lower()
+                if any(b in h for b in ["bthenum", "bluetooth", "acpi", "pnp0501"]):
+                    continue
+                if any(k in h for k in ["10c4:ea60", "cp210", "1a86:7523", "ch340", "0403:6001", "ftdi", "303a:", "esp32"]):
+                    return p.device
+            for p in ports:
+                h = ((p.hwid or "") + " " + (p.description or "")).lower()
+                if any(b in h for b in ["bthenum", "bluetooth", "acpi", "pnp0501"]):
+                    continue
+                if "usb" in h:
+                    return p.device
+            for p in ports:
+                if p.device.upper() == "COM8":
+                    return p.device
+        except Exception:
+            pass
+        return "COM8"
 
     def start(self):
         if not SERIAL_AVAILABLE:
@@ -1693,6 +1719,7 @@ class ESP32MultimodalSource(AudioSourceBase):
                     self.ser = s
 
                     with self.lock:
+                        self.telemetry["port"] = target_port
                         self.telemetry["firmware_mode"] = f"CONNECTED ({target_port} @ {baud})"
                     break
                 except Exception:
@@ -1907,13 +1934,13 @@ class LaptopAudioSource(AudioSourceBase):
 class AcousticRadarApp:
     """Master Interactive HUD with 4-Microphone Live Inputs and Multimodal Telemetry."""
 
-    def __init__(self):
+    def __init__(self, port: str = "auto", baud: int = 921600):
         self.active_source_type = "ESP32"
         self.active_geometry_key = "ESP32_4MIC_LINEAR"
         self.geometry = PRESETS[self.active_geometry_key]
 
         self.sources: Dict[str, AudioSourceBase] = {
-            "ESP32": ESP32MultimodalSource(port="COM8"),
+            "ESP32": ESP32MultimodalSource(port=port, baudrates=(baud, 921600, 1152000, 115200)),
             "SYNTHETIC": Synthetic4ChSource(),
             "LAPTOP": LaptopAudioSource()
         }
@@ -2003,16 +2030,19 @@ class AcousticRadarApp:
             chk_err = telemetry.get("checksum_errors", 0)
             ch_active = telemetry.get("channels_active", 0)
             last_pkt = telemetry.get("last_packet_time", 0.0)
+            port_label = str(telemetry.get("port", getattr(self.current_source, "port", "ESP32")))
+            if port_label == "auto":
+                port_label = "ESP32"
 
             if is_alive and (time.time() - last_pkt < 1.5) and pkt_valid > 5:
                 if ch_active >= 4:
-                    return "LIVE HARDWARE: COM8 @ 921.6k | 4-MIC ULA + ADXL345 + FC-03 (CHK OK)"
+                    return f"LIVE HARDWARE: {port_label} @ 921.6k | 4-MIC ULA + ADXL345 + FC-03 (CHK OK)"
                 else:
-                    return f"LIVE HARDWARE: COM8 ({ch_active}/4 MICS ACTIVE | CHK OK)"
+                    return f"LIVE HARDWARE: {port_label} ({ch_active}/4 MICS ACTIVE | CHK OK)"
             elif is_alive and chk_err > 0:
                 return f"HARDWARE LINK WARNING ({chk_err} CHECKSUM ERRORS)"
             else:
-                return "ESP32 STANDBY / DISCONNECTED (Press 'T' for Demo)"
+                return f"ESP32 STANDBY / DISCONNECTED ({port_label}) (Press 'T' for Demo)"
         elif self.active_source_type == "SYNTHETIC":
             return "SYNTHETIC 4-CH ARRAY & MOTOR SIMULATION"
         elif self.active_source_type == "LAPTOP":
@@ -2828,7 +2858,10 @@ class AcousticRadarApp:
             dir_str = "CENTER" if abs(target_angle) < 6.0 else ("RIGHT" if target_angle > 0 else "LEFT")
             lock_badge = f"* LOCKED ({dir_str})" if is_locked else "SEARCHING / SCANNING..."
             invert_badge = "INVERTED (Key 'I')" if self.invert_channels else "NORMAL (Key 'I')"
-            hw_badge = "STREAMING (COM8)" if hw_alive else "STANDBY / SIMULATION"
+            port_label = str(telemetry.get("port", getattr(self.current_source, "port", "ESP32")))
+            if port_label == "auto":
+                port_label = "ESP32"
+            hw_badge = f"STREAMING ({port_label})" if hw_alive else "STANDBY / SIMULATION"
 
             def make_vu_bar(pct, width=12):
                 filled = int(round((pct / 100.0) * width))
@@ -2964,9 +2997,16 @@ class AcousticRadarApp:
 # ENTRY POINT
 # =============================================================================
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Spatial Multimodal Acoustic Radar Engine (Pro V6)")
+    parser.add_argument("--port", type=str, default="auto", help="ESP32 serial port (default: auto)")
+    parser.add_argument("--baud", type=int, default=921600, help="Serial baudrate (default: 921600)")
+    args, _ = parser.parse_known_args()
+
     print("=====================================================================")
     print(" SPATIAL MULTIMODAL ACOUSTIC RADAR ENGINE (PRO V6)")
     print(" 4-Microphone Uniform Linear Array + Multimodal Fault Localization")
+    print(f" Target Serial Port: {args.port} @ {args.baud} Baud")
     print("=====================================================================")
     print(" Physical Array Mapping on Breadboard:")
     print("   [Mic 1] (Row 20, Pair A Left,  GPIO 19, L/R->GND) -> x = -30.48 mm")
@@ -2976,5 +3016,5 @@ if __name__ == "__main__":
     print(" Total Array Aperture: 60.96 mm | 6 Correlation Delay Pairs")
     print(" ADXL345: SDA=TX2 (GPIO 17), SCL=RX2 (GPIO 16) | FC-03: DO=D4 (GPIO 4)")
     print("=====================================================================")
-    app = AcousticRadarApp()
+    app = AcousticRadarApp(port=args.port, baud=args.baud)
     app.run()
