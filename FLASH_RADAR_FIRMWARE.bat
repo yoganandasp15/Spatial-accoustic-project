@@ -12,10 +12,28 @@ echo.
 set "ARDUINO_CLI=C:\Program Files\Arduino CLI\arduino-cli.exe"
 if not exist "%ARDUINO_CLI%" set "ARDUINO_CLI=arduino-cli"
 
-set "SKETCH_DIR=%~dp0stage3_esp32_firmware\ESP32_Spatial_Acoustic_Radar_Firmware"
+set "PROJECT_DIR="
+if exist "%~dp0stage3_esp32_firmware\ESP32_Spatial_Acoustic_Radar_Firmware\ESP32_Spatial_Acoustic_Radar_Firmware.ino" (
+    set "PROJECT_DIR=%~dp0"
+) else if exist "C:\Users\Yogi\Downloads\Spatial-accoustic-project\stage3_esp32_firmware\ESP32_Spatial_Acoustic_Radar_Firmware\ESP32_Spatial_Acoustic_Radar_Firmware.ino" (
+    set "PROJECT_DIR=C:\Users\Yogi\Downloads\Spatial-accoustic-project"
+) else if exist "%USERPROFILE%\Downloads\Spatial-accoustic-project\stage3_esp32_firmware\ESP32_Spatial_Acoustic_Radar_Firmware\ESP32_Spatial_Acoustic_Radar_Firmware.ino" (
+    set "PROJECT_DIR=%USERPROFILE%\Downloads\Spatial-accoustic-project"
+)
+
+if not defined PROJECT_DIR (
+    color 0C
+    echo [ERROR] Could not locate Spatial-accoustic-project repository.
+    echo         Expected at: C:\Users\Yogi\Downloads\Spatial-accoustic-project
+    pause
+    exit /b 1
+)
+
+set "SKETCH_DIR=%PROJECT_DIR%\stage3_esp32_firmware\ESP32_Spatial_Acoustic_Radar_Firmware"
 set "PORT=COM8"
 if not "%~1"=="" set "PORT=%~1"
 
+echo [*] Repository Root   : %PROJECT_DIR%
 echo [*] Target Serial Port : %PORT%
 echo [*] Sketch Directory   : %SKETCH_DIR%
 echo.
