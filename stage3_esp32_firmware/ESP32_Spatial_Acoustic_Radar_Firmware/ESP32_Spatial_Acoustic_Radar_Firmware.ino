@@ -78,7 +78,7 @@ static int32_t dma_rx1[CHUNK_FRAMES * 2];
 // Telemetry state
 volatile uint32_t tach_pulse_count = 0;
 volatile int64_t last_tach_isr_us = 0;
-#define TACH_DEBOUNCE_US 200  // Refractory debounce window (max 5,000 Hz: 15,000 RPM for 20-slot disc, 300,000 RPM for 1-slot)
+#define TACH_DEBOUNCE_US 10   // 10 us glitch filter (up to 100,000 Hz: supports 300,000 RPM for 20-slot disc, 6,000,000 RPM for 1-slot)
 bool adxl_present = false;
 uint32_t adxl_i2c_errors = 0;
 bool continuous_streaming = true;
@@ -315,6 +315,14 @@ void loop() {
             continuous_streaming = false;
         } else if (c == 'P' || c == 'p') {
             Serial.printf("[PONG] ESP32 4-Mic Radar Streamer Alive (fs=%d, baud=%d, type=0x05)\n", SAMPLE_RATE, SERIAL_BAUD);
+        } else if (c == 'T' || c == 't') {
+            int pin_state = digitalRead(FC03_DO_PIN);
+            int64_t dt_last = esp_timer_get_time() - last_tach_isr_us;
+            Serial.printf("[TACH_DIAG] Pulses=%u | Pin4_State=%d | LastPulseAgo_us=%lld\n",
+                          tach_pulse_count, pin_state, dt_last);
+        } else if (c == 'R' || c == 'r') {
+            tach_pulse_count = 0;
+            Serial.println("[TACH_RESET] Pulse counter reset to 0");
         }
     }
 
