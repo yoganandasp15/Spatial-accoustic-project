@@ -76,6 +76,7 @@ echo  +-------------------------------------------------------------------------
 echo    Workspace Root : %CD%
 echo    Python Engine  : %PYTHON_BIN%
 echo    ESP32 Link     : %DETECTED_PORT% @ 921,600 Baud (Auto-Detected Type 0x05 Streamer)
+echo    Tachometer ISR : Zero-Debounce Direct ISR (Ultra-Fast, Supports >100,000+ RPM)
 echo    Array Geometry : 4-Mic INMP441 ULA (Pitch: 20.32 mm, Span: 60.96 mm)
 echo  +----------------------------------------------------------------------------+
 echo.

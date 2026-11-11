@@ -1934,7 +1934,7 @@ class LaptopAudioSource(AudioSourceBase):
 class AcousticRadarApp:
     """Master Interactive HUD with 4-Microphone Live Inputs and Multimodal Telemetry."""
 
-    def __init__(self, port: str = "auto", baud: int = 921600):
+    def __init__(self, port: str = "auto", baud: int = 921600, pulses_per_rev: int = 1):
         self.active_source_type = "ESP32"
         self.active_geometry_key = "ESP32_4MIC_LINEAR"
         self.geometry = PRESETS[self.active_geometry_key]
@@ -2000,8 +2000,12 @@ class AcousticRadarApp:
         self.motor_engine = MultimodalMotorEngine()
         self.learn_baseline_requested = False
         self.pulses_options = [1, 2, 4, 10, 20]
-        self.pulses_per_rev_idx = 0
-        self.pulses_per_rev = 1
+        self.pulses_per_rev = max(1, int(pulses_per_rev))
+        if self.pulses_per_rev in self.pulses_options:
+            self.pulses_per_rev_idx = self.pulses_options.index(self.pulses_per_rev)
+        else:
+            self.pulses_options.append(self.pulses_per_rev)
+            self.pulses_per_rev_idx = len(self.pulses_options) - 1
 
         # Interactive Motor Demo / Test Profiles (Key 'T' to cycle)
         self.demo_profile_idx = 0
@@ -3001,12 +3005,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Spatial Multimodal Acoustic Radar Engine (Pro V6)")
     parser.add_argument("--port", type=str, default="auto", help="ESP32 serial port (default: auto)")
     parser.add_argument("--baud", type=int, default=921600, help="Serial baudrate (default: 921600)")
+    parser.add_argument("--ppr", "--pulses-per-rev", type=int, default=1, help="Tachometer pulses per revolution (default: 1 for single blade, 20 for slotted disc)")
     args, _ = parser.parse_known_args()
 
     print("=====================================================================")
     print(" SPATIAL MULTIMODAL ACOUSTIC RADAR ENGINE (PRO V6)")
     print(" 4-Microphone Uniform Linear Array + Multimodal Fault Localization")
-    print(f" Target Serial Port: {args.port} @ {args.baud} Baud")
+    print(f" Target Serial Port: {args.port} @ {args.baud} Baud | PPR: {args.ppr}")
     print("=====================================================================")
     print(" Physical Array Mapping on Breadboard:")
     print("   [Mic 1] (Row 20, Pair A Left,  GPIO 19, L/R->GND) -> x = -30.48 mm")
@@ -3016,5 +3021,5 @@ if __name__ == "__main__":
     print(" Total Array Aperture: 60.96 mm | 6 Correlation Delay Pairs")
     print(" ADXL345: SDA=TX2 (GPIO 17), SCL=RX2 (GPIO 16) | FC-03: DO=D4 (GPIO 4)")
     print("=====================================================================")
-    app = AcousticRadarApp(port=args.port, baud=args.baud)
+    app = AcousticRadarApp(port=args.port, baud=args.baud, pulses_per_rev=args.ppr)
     app.run()

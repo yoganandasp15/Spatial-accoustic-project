@@ -78,7 +78,7 @@ static int32_t dma_rx1[CHUNK_FRAMES * 2];
 // Telemetry state
 volatile uint32_t tach_pulse_count = 0;
 volatile int64_t last_tach_isr_us = 0;
-#define TACH_DEBOUNCE_US 10   // 10 us glitch filter (up to 100,000 Hz: supports 300,000 RPM for 20-slot disc, 6,000,000 RPM for 1-slot)
+// Zero-debounce direct optical ISR: allows capturing fast pulses up to >100,000+ RPM
 bool adxl_present = false;
 uint32_t adxl_i2c_errors = 0;
 bool continuous_streaming = true;
@@ -86,11 +86,8 @@ uint16_t packet_seq = 0;
 uint32_t last_ascii_time = 0;
 
 void IRAM_ATTR fc03_isr() {
-    int64_t now_us = esp_timer_get_time();
-    if (now_us - last_tach_isr_us >= TACH_DEBOUNCE_US) {
-        tach_pulse_count++;
-        last_tach_isr_us = now_us;
-    }
+    tach_pulse_count++;
+    last_tach_isr_us = esp_timer_get_time();
 }
 
 bool init_adxl345() {

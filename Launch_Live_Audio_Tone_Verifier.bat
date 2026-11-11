@@ -52,10 +52,12 @@ if not defined SCRIPT_PATH (
 )
 
 echo Target Hardware Port : %DETECTED_PORT% @ 921,600 Baud
+echo Tachometer Engine    : Zero-Debounce Direct ISR (Supports >100,000+ RPM)
 echo Audio Script Path    : %SCRIPT_PATH%
 echo.
 echo Connecting to ESP32 on %DETECTED_PORT%...
 echo Play a 1000 Hz, 500 Hz, or 2000 Hz tone from your phone near the breadboard!
+echo (Press 'P' or pass --ppr N to change tachometer pulses per revolution)
 echo.
 
 "%PYTHON_BIN%" "%SCRIPT_PATH%" --port %DETECTED_PORT% %*

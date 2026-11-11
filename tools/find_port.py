@@ -6,13 +6,14 @@ Filters out virtual Bluetooth COM ports and motherboard ACPI serial ports.
 Outputs the detected device name (e.g. COM8) on stdout.
 """
 import sys
+import argparse
 
-def detect_port() -> str:
+def detect_port(strict: bool = False) -> str:
     try:
         import serial.tools.list_ports as lp
         ports = list(lp.comports())
         if not ports:
-            return "COM8"
+            return "NONE" if strict else "COM8"
 
         # 1. Match known USB-UART bridge hardware descriptors (CP210x, CH340, FTDI, ESP32)
         for p in ports:
@@ -30,15 +31,18 @@ def detect_port() -> str:
             if "usb" in h:
                 return p.device
 
-        # 3. Check for COM8 explicitly if active
+        # 3. Check for COM8 explicitly if active in system
         for p in ports:
             if p.device.upper() == "COM8":
                 return p.device
 
         # Default fallback
-        return "COM8"
+        return "NONE" if strict else "COM8"
     except Exception:
-        return "COM8"
+        return "NONE" if strict else "COM8"
 
 if __name__ == "__main__":
-    print(detect_port())
+    parser = argparse.ArgumentParser(description="Active ESP32 COM Port Detector")
+    parser.add_argument("--strict", action="store_true", help="Return NONE if no genuine USB device is active")
+    args = parser.parse_args()
+    print(detect_port(strict=args.strict))

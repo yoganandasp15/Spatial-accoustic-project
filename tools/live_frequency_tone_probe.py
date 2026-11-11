@@ -32,9 +32,10 @@ BASELINE_M = 0.02032  # 8 pin pitches = 20.32 mm
 C_SOUND = 343.0
 
 
-def run_continuous_probe(port: str = "auto", baud: int = 921600):
+def run_continuous_probe(port: str = "auto", baud: int = 921600, ppr: int = 1):
     if port == "auto" or not port:
         port = detect_port()
+    ppr = max(1, int(ppr))
 
     try:
         import serial
@@ -135,7 +136,7 @@ def run_continuous_probe(port: str = "auto", baud: int = 921600):
                 if dt_p >= 0.50:
                     dp = pulses - last_pulse_count
                     if dp > 0:
-                        instant_rpm = (dp / dt_p) * 60.0
+                        instant_rpm = ((dp / ppr) / dt_p) * 60.0
                     else:
                         instant_rpm = 0.0
                     last_pulse_count = pulses
@@ -199,8 +200,9 @@ def main():
     parser = argparse.ArgumentParser(description="ESP32 4-Channel Live Audio Tone & Multimodal Probe")
     parser.add_argument("--port", type=str, default="auto", help="Serial port (default: auto)")
     parser.add_argument("--baud", type=int, default=921600, help="Baud rate (default: 921600)")
+    parser.add_argument("--ppr", type=int, default=1, help="Pulses per revolution (default: 1 for single blade, 20 for slotted disc)")
     args = parser.parse_args()
-    run_continuous_probe(port=args.port, baud=args.baud)
+    run_continuous_probe(port=args.port, baud=args.baud, ppr=args.ppr)
 
 
 if __name__ == "__main__":
