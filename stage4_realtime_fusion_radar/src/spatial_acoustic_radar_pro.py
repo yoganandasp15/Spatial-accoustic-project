@@ -30,8 +30,28 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import matplotlib
+# Force Qt backend explicitly (most reliable for key events on Windows)
+matplotlib.use("QtAgg")
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
+
+# ── Clear ALL default matplotlib keybindings that steal our keys ──────────────
+# Without this, matplotlib eats: b(back), g(grid), k(log), l(log), p(pan),
+# r(home), s(save), q(quit), c, f, h, i, L, n, t, space, etc.
+_STEAL_KEYS = [
+    "keymap.back", "keymap.forward", "keymap.fullscreen", "keymap.grid",
+    "keymap.grid_minor", "keymap.home", "keymap.pan", "keymap.quit",
+    "keymap.quit_all", "keymap.save", "keymap.xscale", "keymap.yscale",
+    "keymap.zoom", "keymap.copy",
+]
+for _k in _STEAL_KEYS:
+    try:
+        plt.rcParams[_k] = []
+    except KeyError:
+        pass
+# ─────────────────────────────────────────────────────────────────────────────
+
 import numpy as np
 import sounddevice as sd
 from matplotlib.animation import FuncAnimation
@@ -1563,15 +1583,14 @@ class ESP32MultimodalSource(AudioSourceBase):
 
                     now = time.time()
                     dt = now - self.last_pulse_time
-                    if dt >= 0.20:
-                        dp = (pulses - self.last_pulse_count) & 0xFFFFFFFF
-                        if dt > 0:
+                    if dt >= 0.5:
+                        dp = pulses - self.last_pulse_count
+                        if dp >= 0 and dt > 0:
                             self.telemetry["estimated_rpm"] = (dp / dt) * 60.0
                         self.last_pulse_count = pulses
                         self.last_pulse_time = now
 
                     adxl_hw_ok = bool(reserved & 0x01)
-                    pin4_state = 1 if (reserved & 0x02) else 0
                     adxl_hw_str = "ADXL345: ONLINE (400Hz FIFO)" if adxl_hw_ok else "ADXL345: OFFLINE / ABSENT"
 
                     self.telemetry.update({
@@ -1581,7 +1600,6 @@ class ESP32MultimodalSource(AudioSourceBase):
                         "ay_g": latest_ay,
                         "az_g": latest_az,
                         "rpm_pulses": pulses,
-                        "pin4_state": pin4_state,
                         "adxl_hw_ok": adxl_hw_ok,
                         "adxl_hw_str": adxl_hw_str,
                         "firmware_mode": f"4-CH REAL-TIME PCM DMA STREAM ({port_str} @ {baud_str}) [Type 0x05 400Hz FIFO]",
@@ -1782,120 +1800,64 @@ SerialAudioSource = ESP32MultimodalSource
 
 
 class Synthetic4ChSource(AudioSourceBase):
-    """
-    Simulates a 4-channel orbiting acoustic emitter with 3-axis vibration and shaft tachometer.
-    Supports dynamic RPM tuning from 60 RPM to 120,000 RPM with accurate pulse accumulation,
-    harmonic acoustic signature synthesis (1X, 2X, 3X, BPF), and 3-axis ADXL345 dynamic vibration.
-    """
+    """Simulates a 4-channel orbiting acoustic emitter with 3-axis vibration and shaft tachometer."""
 
-    def __init__(self, fs: float = 16000.0, target_rpm: float = 0.0, ppr: int = 1):
+    def __init__(self, fs: float = 16000.0):
         self.fs = fs
         self.channels = 4
         self.frame_len = 512
         self.t_phase = 0.0
-        self.target_rpm = float(target_rpm)
-        self.ppr = max(1, int(ppr))
-        self.pulses = 0
-        self.pulse_float = 0.0
-        self.lock = threading.Lock()
-        self.cached_frame = np.zeros((self.frame_len, self.channels), dtype=np.float32)
-
-    def set_rpm(self, rpm: float):
-        with self.lock:
-            self.target_rpm = max(0.0, min(200000.0, float(rpm)))
-
-    def adjust_rpm(self, delta_rpm: float):
-        with self.lock:
-            self.target_rpm = max(0.0, min(200000.0, self.target_rpm + float(delta_rpm)))
-
-    def set_ppr(self, ppr: int):
-        with self.lock:
-            self.ppr = max(1, int(ppr))
+        self.pulses = 120
 
     def start(self): pass
     def stop(self): pass
 
     def get_frame(self) -> np.ndarray:
-        with self.lock:
-            cur_rpm = self.target_rpm
-            cur_ppr = self.ppr
-
-        dt = self.frame_len / self.fs
         t = np.arange(self.frame_len) / self.fs + self.t_phase
-        self.t_phase += dt
+        self.t_phase += self.frame_len / self.fs
 
-        if cur_rpm <= 0.0:
-            # Motor is stationary (0 RPM): no pulse accumulation, no synthetic tones
-            out = (0.012 * np.random.randn(self.frame_len, 4)).astype(np.float32)
-            self.cached_frame = out.copy()
-            return out
-
-        # Pulse Accumulator: pulse rate f_p = (RPM / 60) * PPR
-        pulse_delta = (cur_rpm / 60.0) * cur_ppr * dt
-        self.pulse_float += pulse_delta
-        n_new = int(self.pulse_float)
-        self.pulses = (self.pulses + n_new) & 0xFFFFFFFF
-        self.pulse_float -= n_new
-
-        # Move source sinusoidally across [-40 deg, +40 deg] for acoustic localization
+        # Move source sinusoidally across [-40 deg, +40 deg]
         angle_deg = 35.0 * np.sin(2.0 * np.pi * 0.28 * self.t_phase)
         angle_rad = np.deg2rad(angle_deg)
         d_pitch = 0.02032
         mic_x = np.array([-1.5, -0.5, +0.5, +1.5]) * d_pitch
 
-        # Motor shaft frequency f0 and harmonics
-        f0 = max(10.0, cur_rpm / 60.0)
-        f_max = 0.45 * self.fs
-        f_1x = f0 if f0 < f_max else (f0 % f_max)
-        f_2x = (2.0 * f0) if (2.0 * f0) < f_max else ((2.0 * f0) % f_max)
-        f_3x = (3.0 * f0) if (3.0 * f0) < f_max else ((3.0 * f0) % f_max)
-
+        # Multi-harmonic rotating machinery audio signature with exact continuous sub-sample delays
         out = np.zeros((self.frame_len, 4), dtype=np.float32)
         for i in range(4):
             delay_s = (mic_x[i] * np.sin(angle_rad)) / SPEED_OF_SOUND
             t_i = t + delay_s
             sig_i = (
-                0.55 * np.sin(2 * np.pi * f_1x * t_i)
-                + 0.25 * np.sin(2 * np.pi * f_2x * t_i)
-                + 0.12 * np.sin(2 * np.pi * f_3x * t_i)
+                0.60 * np.sin(2 * np.pi * 1200.0 * t_i)
+                + 0.25 * np.sin(2 * np.pi * 2400.0 * t_i)
+                + 0.10 * np.sin(2 * np.pi * 3600.0 * t_i)
                 + 0.03 * np.random.randn(self.frame_len)
             ).astype(np.float32)
             out[:, i] = sig_i
 
-        self.cached_frame = out.copy()
+        self.pulses += int(np.random.randint(1, 4))
         return out
 
     def get_fs(self) -> float: return self.fs
     def get_channels(self) -> int: return self.channels
-
     def get_multimodal_telemetry(self) -> Dict[str, object]:
-        with self.lock:
-            cur_rpm = self.target_rpm
-            cur_pulses = self.pulses
-            cur_ppr = self.ppr
-
-        f0 = cur_rpm / 60.0 if cur_rpm > 0 else 0.0
-        if cur_rpm <= 0.0:
-            vib_x, vib_y, vib_z = 0.0, 0.0, -0.82
-        else:
-            vib_x = 0.18 * math.sin(2.0 * math.pi * min(f0, 180.0) * self.t_phase)
-            vib_y = 0.22 * math.cos(2.0 * math.pi * min(f0, 180.0) * self.t_phase)
-            vib_z = -0.82 + 0.10 * math.sin(4.0 * math.pi * min(f0, 180.0) * self.t_phase)
+        vib_x = 0.12 * math.sin(2.0 * math.pi * 18.0 * self.t_phase)
+        vib_y = 0.15 * math.cos(2.0 * math.pi * 18.0 * self.t_phase)
+        vib_z = -0.82 + 0.08 * math.sin(2.0 * math.pi * 36.0 * self.t_phase)
+        rpm = 1080.0 + 20.0 * math.sin(self.t_phase)
 
         rms_counts = [
-            float(np.sqrt(np.mean(self.cached_frame[:, i]**2)) * 12000.0) for i in range(4)
+            float(np.sqrt(np.mean(self.get_frame()[:, i]**2)) * 12000.0) for i in range(4)
         ]
 
         return {
             "ax_g": vib_x, "ay_g": vib_y, "az_g": vib_z,
-            "rpm_pulses": cur_pulses,
-            "estimated_rpm": cur_rpm * cur_ppr,
-            "firmware_mode": f"HIGH-SPEED MOTOR SIMULATOR ({cur_rpm:,.0f} RPM)",
+            "rpm_pulses": self.pulses,
+            "estimated_rpm": rpm,
+            "firmware_mode": "SYNTHETIC 4-CH ARRAY SIMULATION",
             "rms_counts": rms_counts,
             "peak_counts": [int(v * 1.45) for v in rms_counts],
-            "is_hardware_alive": True,
-            "target_rpm": cur_rpm,
-            "shaft_f0_hz": f0
+            "is_hardware_alive": True
         }
 
     def get_vibration_history(self, max_samples: int = 512) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -1903,11 +1865,9 @@ class Synthetic4ChSource(AudioSourceBase):
         fs_sim = 400.0
         n_samples = min(max_samples, 256)
         t_arr = np.linspace(t_now - n_samples / fs_sim, t_now, n_samples)
-        with self.lock:
-            f0 = min(self.target_rpm / 60.0, 180.0)
-        vib_x = (0.22 * np.sin(2.0 * np.pi * f0 * t_arr)).astype(np.float32)
-        vib_y = (0.25 * np.cos(2.0 * np.pi * f0 * t_arr)).astype(np.float32)
-        vib_z = (-0.82 + 0.12 * np.sin(4.0 * np.pi * f0 * t_arr)).astype(np.float32)
+        vib_x = (0.12 * np.sin(2.0 * np.pi * 18.0 * t_arr)).astype(np.float32)
+        vib_y = (0.15 * np.cos(2.0 * np.pi * 18.0 * t_arr)).astype(np.float32)
+        vib_z = (-0.82 + 0.08 * np.sin(2.0 * np.pi * 36.0 * t_arr)).astype(np.float32)
         return t_arr, vib_x, vib_y, vib_z
 
 
@@ -1978,89 +1938,32 @@ class LaptopAudioSource(AudioSourceBase):
     def get_fs(self) -> float: return self.fs
     def get_channels(self) -> int: return self.channels
     def get_multimodal_telemetry(self) -> Dict[str, object]:
-        with self.lock:
-            frame_copy = self.buffer.copy()
-
-        # Acoustic peak frequency estimation for acoustic tachometer capability
-        acoustic_rpm = 0.0
-        f_peak = 0.0
-        try:
-            mono = np.mean(frame_copy, axis=1)
-            mono_ac = mono - np.mean(mono)
-            if np.max(np.abs(mono_ac)) > 0.01:
-                fft_mag = np.abs(np.fft.rfft(mono_ac * np.hanning(len(mono_ac))))
-                freqs = np.fft.rfftfreq(len(mono_ac), 1.0 / self.fs)
-                mask = (freqs >= 100.0) & (freqs <= 4000.0)
-                if np.any(mask) and np.max(fft_mag[mask]) > 0.1:
-                    f_peak = float(freqs[mask][np.argmax(fft_mag[mask])])
-                    acoustic_rpm = f_peak * 60.0
-        except Exception:
-            pass
-
-        rms_counts = [float(np.sqrt(np.mean(frame_copy[:, i]**2)) * 10000.0) for i in range(4)]
         return {
             "ax_g": 0.0, "ay_g": 0.0, "az_g": -1.0,
-            "rpm_pulses": 0,
-            "estimated_rpm": acoustic_rpm,
-            "firmware_mode": f"LAPTOP INTERNAL MIC ({self.channels}-CH)" + (f" [Acoustic Tone: {f_peak:.0f}Hz]" if f_peak > 0 else ""),
-            "rms_counts": rms_counts,
-            "peak_counts": [int(v * 1.45) for v in rms_counts],
-            "is_hardware_alive": True,
-            "acoustic_rpm": acoustic_rpm
+            "rpm_pulses": 0, "estimated_rpm": 0.0,
+            "firmware_mode": f"LAPTOP INTERNAL MIC ({self.channels}-CH)",
+            "rms_counts": [float(np.sqrt(np.mean(self.buffer[:, i]**2))*10000) for i in range(4)],
+            "peak_counts": [1000, 1000, 1000, 1000],
+            "is_hardware_alive": True
         }
 
 
+# =============================================================================
+# MASTER RADAR PRO 4-CHANNEL HUD APPLICATION
+# =============================================================================
 class AcousticRadarApp:
     """Master Interactive HUD with 4-Microphone Live Inputs and Multimodal Telemetry."""
 
-    def __init__(self, port: str = "auto", baud: int = 921600, pulses_per_rev: int = 1, source: str = "auto", initial_rpm: float = 0.0):
+    def __init__(self, port: str = "auto", baud: int = 921600, pulses_per_rev: int = 1):
+        self.active_source_type = "ESP32"
+        self.active_geometry_key = "ESP32_4MIC_LINEAR"
+        self.geometry = PRESETS[self.active_geometry_key]
+
         self.sources: Dict[str, AudioSourceBase] = {
             "ESP32": ESP32MultimodalSource(port=port, baudrates=(baud, 921600, 1152000, 115200)),
-            "SYNTHETIC": Synthetic4ChSource(target_rpm=initial_rpm, ppr=pulses_per_rev),
+            "SYNTHETIC": Synthetic4ChSource(),
             "LAPTOP": LaptopAudioSource()
         }
-
-        # Resolve active source mode
-        src_norm = (source or "auto").lower()
-        if src_norm == "laptop":
-            self.active_source_type = "LAPTOP"
-            self.active_geometry_key = "ESP32_4MIC_LINEAR" if self.sources["LAPTOP"].get_channels() >= 4 else "LAPTOP_DUAL"
-        elif src_norm == "synthetic":
-            self.active_source_type = "SYNTHETIC"
-            self.active_geometry_key = "ESP32_4MIC_LINEAR"
-        elif src_norm == "esp32":
-            self.active_source_type = "ESP32"
-            self.active_geometry_key = "ESP32_4MIC_LINEAR"
-        else:  # "auto"
-            # Check if ESP32 hardware is actively streaming Type 0x05 telemetry packets
-            is_streaming = False
-            try:
-                tools_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "tools")
-                if tools_dir not in sys.path:
-                    sys.path.insert(0, tools_dir)
-                import find_port
-                active_dev = find_port.detect_port(check_streaming=True)
-                if active_dev != "NONE":
-                    is_streaming = True
-            except Exception:
-                pass
-
-            if is_streaming:
-                self.active_source_type = "ESP32"
-                self.active_geometry_key = "ESP32_4MIC_LINEAR"
-                print(f"\n[+] Live ESP32 Telemetry Detected on {port} @ {baud} Baud (Hardware Mode Active)\n")
-            else:
-                self.active_source_type = "SYNTHETIC"
-                self.active_geometry_key = "ESP32_4MIC_LINEAR"
-                print("\n" + "="*72)
-                print(" [*] NOTICE: ESP32 hardware is not streaming Type 0x05 telemetry.")
-                print(f" [*] Auto-started in High-Speed Motor Simulator Mode ({initial_rpm:,.0f} RPM).")
-                print("     All inputs are LIVE! Use [UP]/[DOWN] or [+][-] to tune motor RPM.")
-                print("     Press '1' for Laptop/PC Microphone (Live soundcard audio input).")
-                print("     Press '2' for ESP32 Hardware | Press '3' for Simulator.")
-                print("="*72 + "\n")
-
-        self.geometry = PRESETS[self.active_geometry_key]
         self.current_source = self.sources[self.active_source_type]
         self.current_source.start()
 
@@ -2131,13 +2034,10 @@ class AcousticRadarApp:
             "DEMO_HEALTHY_1800RPM",
             "DEMO_UNBALANCE_1X",
             "DEMO_MISALIGNMENT_2X",
-            "DEMO_DISTURBANCE_PROOF",
-            "DEMO_HIGH_SPEED_25K_RPM",
-            "DEMO_HYPER_SPEED_100K_RPM"
+            "DEMO_DISTURBANCE_PROOF"
         ]
         self.demo_phase = 0.0
         self.demo_pulses = 120
-        self.demo_pulse_accum = 0.0
         self._last_seen_pulses = -1
         self._last_pulse_blink_time = 0.0
 
@@ -2147,17 +2047,6 @@ class AcousticRadarApp:
         """Returns concise evidence mode tag that never overflows the top header."""
         if getattr(self, "demo_profile_idx", 0) > 0:
             return f"DEMO MODE: {self.demo_profiles[self.demo_profile_idx]} (Press 'T' for Live)"
-        if self.active_source_type == "SYNTHETIC":
-            synth_src = self.sources.get("SYNTHETIC")
-            tgt_rpm = getattr(synth_src, "target_rpm", 0.0)
-            return f"SIMULATOR: {tgt_rpm:,.0f} RPM (f0={tgt_rpm/60.0:.1f}Hz) | Controls: [UP/DN] or [+/-]"
-        if self.active_source_type == "LAPTOP":
-            lap_src = self.sources.get("LAPTOP")
-            ch_num = getattr(lap_src, "channels", 2)
-            telem = lap_src.get_multimodal_telemetry() if lap_src else {}
-            ac_rpm = telem.get("acoustic_rpm", 0.0)
-            rpm_hint = f" | Acoustic: {ac_rpm:.0f} RPM" if ac_rpm > 100 else ""
-            return f"PC MICROPHONE: {ch_num}-CH Soundcard Ingestion{rpm_hint} (Live Audio Input)"
         if self.active_source_type == "ESP32":
             telemetry = self.current_source.get_multimodal_telemetry()
             is_alive = telemetry.get("is_hardware_alive", False)
@@ -2425,140 +2314,79 @@ class AcousticRadarApp:
         )
 
         # ---------------------------------------------------------------------
-        # 6 & 7. RIGHT COLUMN: SHAFT SPEED + HARMONIC ORDERS + MOTOR DIAGNOSTICS
+        # 6. ROTATIONAL ORDER SPECTRUM & TACHOMETER (Col 3 Top: gs[0, 3])
         # ---------------------------------------------------------------------
-        gs_right = gridspec.GridSpecFromSubplotSpec(
-            3, 1, subplot_spec=gs[:, 3],
-            height_ratios=[0.95, 1.35, 2.55], hspace=0.40
+        self.ax_order = self.fig.add_subplot(gs[0, 3], facecolor="#0b111d")
+
+        # Digital Speedometer Readout (Sized to fit strictly inside Col 3)
+        self.speedometer_text = self.ax_order.text(
+            0.50, 0.90, "SPEED: 0 RPM (f0 = 0.0 Hz)",
+            transform=self.ax_order.transAxes,
+            ha="center", va="center", color="#00ffcc", fontsize=9.2, fontweight="bold", family="monospace",
+            bbox=dict(boxstyle="round,pad=0.28", facecolor="#101b2d", edgecolor="#00ffcc", linewidth=1.3)
         )
 
-        # 6A. SHAFT SPEED CARD
-        self.ax_speed = self.fig.add_subplot(gs_right[0, 0], facecolor="#0b111d")
-        self.ax_speed.set_xticks([])
-        self.ax_speed.set_yticks([])
-        for spine in self.ax_speed.spines.values():
-            spine.set_edgecolor("#1e293b")
-            spine.set_linewidth(1.1)
-        self.ax_speed.text(
-            0.0, 1.07, "SHAFT SPEED", transform=self.ax_speed.transAxes,
-            ha="left", va="bottom", color="#e2e8f0", fontsize=9.5, fontweight="bold"
-        )
-        self.ax_speed.text(
-            1.0, 1.07, "FC-03 optical tachometer", transform=self.ax_speed.transAxes,
-            ha="right", va="bottom", color="#64748b", fontsize=7.8
-        )
-        self.speedometer_text = self.ax_speed.text(
-            0.50, 0.65, "0 RPM",
-            transform=self.ax_speed.transAxes,
-            ha="center", va="center", color="#2dd4bf", fontsize=20.0, fontweight="bold", family="monospace"
-        )
-        self.speed_sub_text = self.ax_speed.text(
-            0.50, 0.34, "○ STANDBY  ·  f0 = 0.0 Hz",
-            transform=self.ax_speed.transAxes,
-            ha="center", va="center", color="#94a3b8", fontsize=8.5, fontweight="bold"
-        )
-        self.tach_indicator_text = self.ax_speed.text(
-            0.50, 0.14, "○ FC-03 idle  ·  0 pulses",
-            transform=self.ax_speed.transAxes,
-            ha="center", va="center", color="#64748b", fontsize=7.8
-        )
-
-        # 6B. HARMONIC ORDERS BAR CHART
-        self.ax_order = self.fig.add_subplot(gs_right[1, 0], facecolor="#0b111d")
-        for spine in self.ax_order.spines.values():
-            spine.set_edgecolor("#1e293b")
-            spine.set_linewidth(1.0)
-        self.ax_order.text(
-            0.0, 1.06, "HARMONIC ORDERS", transform=self.ax_order.transAxes,
-            ha="left", va="bottom", color="#e2e8f0", fontsize=9.5, fontweight="bold"
-        )
-        self.ax_order.text(
-            1.0, 1.06, "share of rotational energy", transform=self.ax_order.transAxes,
-            ha="right", va="bottom", color="#64748b", fontsize=7.8
+        # FC-03 Pulse Blinker LED
+        self.tach_indicator_text = self.ax_order.text(
+            0.50, 0.76, "○ FC-03 TACH: READY (0 Pulses)",
+            transform=self.ax_order.transAxes,
+            ha="center", va="center", color="#8da2c0", fontsize=8.0, fontweight="bold", family="monospace"
         )
 
         bar_x = [0, 1, 2]
         self.order_bars = self.ax_order.bar(
             bar_x, [0.0, 0.0, 0.0],
-            width=0.44,
-            color=["#f87171", "#38bdf8", "#64748b"],
-            edgecolor="none", zorder=3
+            width=0.52,
+            color=["#00ffcc", "#38bdf8", "#e879f9"],
+            edgecolor="#ffffff", linewidth=1.0, zorder=3
         )
         self.ax_order.set_xticks(bar_x)
-        self.ax_order.set_xticklabels(
-            ["1X\nunbalance", "2X\nmisalignment", "3X\nharmonic"],
-            fontsize=7.8, color="#94a3b8"
-        )
-        self.ax_order.set_ylim(0, 42)
-        self.ax_order.set_yticks([0, 10, 20, 30, 40])
-        self.ax_order.tick_params(colors="#64748b", labelsize=7.5)
-        self.ax_order.grid(alpha=0.18, color="#334155", axis="y", zorder=0)
+        self.ax_order.set_xticklabels(["1X (Unbalance)", "2X (Misalign)", "3X (Harmonic)"], fontsize=8.2, color="#b8c2d1", fontweight="bold")
+        self.ax_order.set_ylim(0, 118)
+        self.ax_order.set_ylabel("Rotational Energy (%)", color="#b8c2d1", fontsize=8.5)
+        self.ax_order.set_title("6. SHAFT RPM & ROTATIONAL ORDERS", color="#ffffff", fontsize=10, weight="bold", pad=8)
+        self.ax_order.tick_params(colors="#b8c2d1", labelsize=8)
+        self.ax_order.grid(alpha=0.15, color="#34496d", axis="y")
 
         self.bar_labels = [
-            self.ax_order.text(i, 1.5, "0.0%", ha="center", va="bottom", fontsize=8.2, fontweight="bold", color="#e2e8f0")
+            self.ax_order.text(i, 3.0, "0.0%", ha="center", va="bottom", fontsize=8.2, fontweight="bold", color="#ffffff")
             for i in range(3)
         ]
 
-        # 7. MOTOR DIAGNOSTICS (MULTIMODAL FUSION CARD)
-        self.ax_telemetry = self.fig.add_subplot(gs_right[2, 0], facecolor="#0b111d")
-        self.ax_telemetry.set_xlim(0, 1)
-        self.ax_telemetry.set_ylim(0, 1)
+        # ---------------------------------------------------------------------
+        # 7. MULTIMODAL EDGE-AI FUSION & MINOR PROJECT VISION HUD (Col 3 Bottom: gs[1, 3])
+        # ---------------------------------------------------------------------
+        self.ax_telemetry = self.fig.add_subplot(gs[1, 3], facecolor="#0b111d")
+        self.ax_telemetry.set_title("7. MULTIMODAL FUSION (WHAT & WHERE)", color="#00ffcc", fontsize=10, weight="bold", pad=8)
         self.ax_telemetry.set_xticks([])
         self.ax_telemetry.set_yticks([])
         for spine in self.ax_telemetry.spines.values():
             spine.set_edgecolor("#1e293b")
-            spine.set_linewidth(1.1)
-        self.ax_telemetry.text(
-            0.0, 1.03, "MOTOR DIAGNOSTICS", transform=self.ax_telemetry.transAxes,
-            ha="left", va="bottom", color="#e2e8f0", fontsize=9.5, fontweight="bold"
-        )
-        self.ax_telemetry.text(
-            1.0, 1.03, "multimodal fusion", transform=self.ax_telemetry.transAxes,
-            ha="right", va="bottom", color="#64748b", fontsize=7.8
-        )
+            spine.set_linewidth(1.2)
 
-        self.health_score_text = self.ax_telemetry.text(
-            0.05, 0.88, "--.-%",
-            transform=self.ax_telemetry.transAxes,
-            ha="left", va="center", color="#2dd4bf", fontsize=21.0, fontweight="bold", family="monospace"
-        )
-        self.health_status_text = self.ax_telemetry.text(
-            0.46, 0.90, "STANDBY",
-            transform=self.ax_telemetry.transAxes,
-            ha="left", va="center", color="#2dd4bf", fontsize=10.5, fontweight="bold"
-        )
-        self.ax_telemetry.text(
-            0.46, 0.835, "motor health index",
-            transform=self.ax_telemetry.transAxes,
-            ha="left", va="center", color="#64748b", fontsize=7.5
-        )
-
-        # Health progress bar track + fill
-        self.health_bar_bg, = self.ax_telemetry.plot(
-            [0.05, 0.95], [0.76, 0.76],
-            color="#1e293b", linewidth=5.5, solid_capstyle="butt", zorder=2
-        )
-        self.health_bar_fill, = self.ax_telemetry.plot(
-            [0.05, 0.05], [0.76, 0.76],
-            color="#2dd4bf", linewidth=5.5, solid_capstyle="butt", zorder=3
-        )
-
-        self.ax_telemetry.text(
-            0.05, 0.70, "DIAGNOSIS",
-            transform=self.ax_telemetry.transAxes,
-            ha="left", va="center", color="#64748b", fontsize=7.2, fontweight="bold"
-        )
+        # Card 1: WHAT IS WRONG? (Mechanical Condition)
         self.what_box_text = self.ax_telemetry.text(
-            0.05, 0.625, "MOTOR STOPPED / STANDBY\nAwaiting shaft rotation...",
+            0.50, 0.91,
+            "WHAT IS WRONG? (MECHANICAL STATE)\nINITIALIZING...",
             transform=self.ax_telemetry.transAxes,
-            ha="left", va="center", color="#f8fafc", fontsize=8.0, fontweight="bold", linespacing=1.25
+            ha="center", va="center", color="#00ffcc", fontsize=8.0, fontweight="bold", family="monospace",
+            bbox=dict(boxstyle="round,pad=0.30", facecolor="#101b2d", edgecolor="#00ffcc", linewidth=1.3)
         )
 
-        # Clean 10-row key-value telemetry table
-        self.hud_text = self.ax_telemetry.text(
-            0.05, 0.505, "Acquiring Multimodal Telemetry...",
+        # Card 2: WHERE IS IT? (Spatial Localization & Fusion)
+        self.where_box_text = self.ax_telemetry.text(
+            0.50, 0.73,
+            "WHERE IS THE SOUND? (SPATIAL DOA)\nSCANNING...",
             transform=self.ax_telemetry.transAxes,
-            va="top", ha="left", color="#cbd5e1", fontsize=7.1, family="monospace", linespacing=1.36
+            ha="center", va="center", color="#38bdf8", fontsize=8.0, fontweight="bold", family="monospace",
+            bbox=dict(boxstyle="round,pad=0.28", facecolor="#101b2d", edgecolor="#38bdf8", linewidth=1.2)
+        )
+
+        # Structured Telemetry & Hotkey Block (Strictly width-bounded <46 chars so zero clipping!)
+        self.hud_text = self.ax_telemetry.text(
+            0.03, 0.60, "Acquiring Multimodal Telemetry...",
+            transform=self.ax_telemetry.transAxes,
+            va="top", ha="left", color="#e2e8f0", fontsize=7.3, family="monospace", linespacing=1.18
         )
 
         # ---------------------------------------------------------------------
@@ -2618,26 +2446,6 @@ class AcousticRadarApp:
             self._switch_source("ESP32", "ESP32_4MIC_LINEAR")
         elif event.key in ("3",):
             self._switch_source("SYNTHETIC", "ESP32_4MIC_LINEAR")
-        elif event.key in ("up", "+", "="):
-            if self.active_source_type == "SYNTHETIC":
-                self.sources["SYNTHETIC"].adjust_rpm(+2500.0)
-                cur_rpm = self.sources["SYNTHETIC"].target_rpm
-                print(f"[+] High-Speed Simulator RPM Increased: {cur_rpm:,.0f} RPM (f0 = {cur_rpm/60.0:.1f} Hz)")
-        elif event.key in ("down", "-", "_"):
-            if self.active_source_type == "SYNTHETIC":
-                self.sources["SYNTHETIC"].adjust_rpm(-2500.0)
-                cur_rpm = self.sources["SYNTHETIC"].target_rpm
-                print(f"[+] High-Speed Simulator RPM Decreased: {cur_rpm:,.0f} RPM (f0 = {cur_rpm/60.0:.1f} Hz)")
-        elif event.key in ("pageup",):
-            if self.active_source_type == "SYNTHETIC":
-                self.sources["SYNTHETIC"].adjust_rpm(+10000.0)
-                cur_rpm = self.sources["SYNTHETIC"].target_rpm
-                print(f"[+] High-Speed Simulator RPM +10k Step: {cur_rpm:,.0f} RPM")
-        elif event.key in ("pagedown",):
-            if self.active_source_type == "SYNTHETIC":
-                self.sources["SYNTHETIC"].adjust_rpm(-10000.0)
-                cur_rpm = self.sources["SYNTHETIC"].target_rpm
-                print(f"[+] High-Speed Simulator RPM -10k Step: {cur_rpm:,.0f} RPM")
         elif event.key in ("m", "g", "M", "G"):
             keys = list(PRESETS.keys())
             idx = (keys.index(self.active_geometry_key) + 1) % len(keys)
@@ -2697,9 +2505,8 @@ class AcousticRadarApp:
             self.sector_banner_text,
             self.vib_line_x, self.vib_line_y, self.vib_line_z, self.vib_line_dyn,
             self.vib_badge_text,
-            self.speedometer_text, self.speed_sub_text, self.tach_indicator_text,
-            self.health_score_text, self.health_status_text, self.health_bar_fill,
-            self.what_box_text, self.title_text
+            self.speedometer_text, self.tach_indicator_text,
+            self.what_box_text, self.where_box_text, self.title_text
         ] + list(self.order_bars) + self.bar_labels + self.wave_lines + self.vu_texts
 
         if self.paused:
@@ -2981,33 +2788,8 @@ class AcousticRadarApp:
                     az_arr = -0.82 + 0.020 * np.sin(4.0 * np.pi * f_shaft * t_sim_arr) + 0.008 * np.random.randn(n_sim_vib)
                     vib_hist = (t_sim_arr, ax_arr.astype(np.float32), ay_arr.astype(np.float32), az_arr.astype(np.float32))
                     ax_g, ay_g, az_g = float(ax_arr[-1]), float(ay_arr[-1]), float(az_arr[-1])
+                    # Injected acoustic noise proves PDF Page 13 disturbance rejection
                     raw_frame = (raw_frame + 0.15 * np.random.randn(*raw_frame.shape)).astype(np.float32)
-                elif demo_name == "DEMO_HIGH_SPEED_25K_RPM":
-                    rpm = 25000.0 + 120.0 * math.sin(self.demo_phase * 2.0)
-                    self.demo_pulse_accum += (rpm / 60.0) * self.pulses_per_rev * (n_sim_vib / 400.0)
-                    n_step = int(self.demo_pulse_accum)
-                    self.demo_pulses = (self.demo_pulses + n_step) & 0xFFFFFFFF
-                    self.demo_pulse_accum -= n_step
-                    pulses = self.demo_pulses
-                    f_shaft = rpm / 60.0
-                    ax_arr = 0.550 * np.sin(2.0 * np.pi * min(f_shaft, 180.0) * t_sim_arr) + 0.040 * np.random.randn(n_sim_vib)
-                    ay_arr = 0.580 * np.cos(2.0 * np.pi * min(f_shaft, 180.0) * t_sim_arr) + 0.040 * np.random.randn(n_sim_vib)
-                    az_arr = -0.82 + 0.220 * np.sin(4.0 * np.pi * min(f_shaft, 180.0) * t_sim_arr) + 0.025 * np.random.randn(n_sim_vib)
-                    vib_hist = (t_sim_arr, ax_arr.astype(np.float32), ay_arr.astype(np.float32), az_arr.astype(np.float32))
-                    ax_g, ay_g, az_g = float(ax_arr[-1]), float(ay_arr[-1]), float(az_arr[-1])
-                elif demo_name == "DEMO_HYPER_SPEED_100K_RPM":
-                    rpm = 100000.0 + 350.0 * math.sin(self.demo_phase * 2.0)
-                    self.demo_pulse_accum += (rpm / 60.0) * self.pulses_per_rev * (n_sim_vib / 400.0)
-                    n_step = int(self.demo_pulse_accum)
-                    self.demo_pulses = (self.demo_pulses + n_step) & 0xFFFFFFFF
-                    self.demo_pulse_accum -= n_step
-                    pulses = self.demo_pulses
-                    f_shaft = rpm / 60.0
-                    ax_arr = 1.150 * np.sin(2.0 * np.pi * min(f_shaft, 180.0) * t_sim_arr) + 0.080 * np.random.randn(n_sim_vib)
-                    ay_arr = 1.200 * np.cos(2.0 * np.pi * min(f_shaft, 180.0) * t_sim_arr) + 0.080 * np.random.randn(n_sim_vib)
-                    az_arr = -0.82 + 0.450 * np.sin(4.0 * np.pi * min(f_shaft, 180.0) * t_sim_arr) + 0.040 * np.random.randn(n_sim_vib)
-                    vib_hist = (t_sim_arr, ax_arr.astype(np.float32), ay_arr.astype(np.float32), az_arr.astype(np.float32))
-                    ax_g, ay_g, az_g = float(ax_arr[-1]), float(ay_arr[-1]), float(az_arr[-1])
 
             motor_diag = self.motor_engine.analyze(raw_frame, fs, ax_g, ay_g, az_g, rpm, vib_history=vib_hist)
             dyn_vib_g = float(motor_diag.get("dyn_vib_g", 0.0))
@@ -3049,150 +2831,171 @@ class AcousticRadarApp:
             )
             self.vib_badge_text.set_color(motor_diag["iso_color"])
 
-            # 7A. Update SHAFT SPEED card (gs_right[0, 0])
+            # Update Rotational Order Spectrum & Tachometer Speedometer (gs[0, 3])
             if pulses > self._last_seen_pulses:
                 self._last_pulse_blink_time = now
                 self._last_seen_pulses = pulses
 
             is_blinking = (now - self._last_pulse_blink_time) < 0.25
 
-            if is_running:
-                self.speedometer_text.set_text(f"{rpm:,.0f} RPM")
-                self.speedometer_text.set_color("#2dd4bf")
-                self.speed_sub_text.set_text(f"● RUNNING  ·  f0 = {motor_diag['f0_hz']:.1f} Hz")
-                self.speed_sub_text.set_color("#2dd4bf")
-            else:
-                self.speedometer_text.set_text("0 RPM")
-                self.speedometer_text.set_color("#64748b")
-                self.speed_sub_text.set_text("○ STANDBY  ·  f0 = 0.0 Hz")
-                self.speed_sub_text.set_color("#94a3b8")
-
             if is_blinking or (is_running and (int(now * 8) % 2 == 0)):
-                self.tach_indicator_text.set_text(f"● FC-03 pulse active  ·  {pulses:,} pulses")
-                self.tach_indicator_text.set_color("#2dd4bf")
+                self.tach_indicator_text.set_text(f"● FC-03 TACH: PULSE ACTIVE ({pulses} Pulses)")
+                self.tach_indicator_text.set_color("#00ffcc")
             elif pulses > 0:
-                self.tach_indicator_text.set_text(f"○ FC-03 ready  ·  {pulses:,} pulses")
+                self.tach_indicator_text.set_text(f"○ FC-03 TACH: READY ({pulses} Pulses)")
                 self.tach_indicator_text.set_color("#8da2c0")
             else:
-                self.tach_indicator_text.set_text("○ FC-03 idle  ·  0 pulses")
+                self.tach_indicator_text.set_text("○ FC-03 TACH: READY (0 Pulses — Shaft Idle)")
                 self.tach_indicator_text.set_color("#64748b")
 
-            # 7B. Update HARMONIC ORDERS bar chart (gs_right[1, 0])
+            if is_running:
+                self.speedometer_text.set_text(f"● RUNNING: {rpm:4.0f} RPM (f0 = {motor_diag['f0_hz']:.1f} Hz)")
+                self.speedometer_text.set_color("#00ffcc")
+            else:
+                self.speedometer_text.set_text("○ MOTOR STOPPED / STANDBY (0 RPM)")
+                self.speedometer_text.set_color("#94a3b8")
+
             e1 = float(motor_diag.get("e_1x_pct", 0.0))
             e2 = float(motor_diag.get("e_2x_pct", 0.0))
             e3 = float(motor_diag.get("e_3x_pct", 0.0))
-
-            y_top_ord = max(42.0, max(e1, e2, e3) * 1.25)
-            self.ax_order.set_ylim(0, y_top_ord)
 
             self.order_bars[0].set_height(e1)
             self.order_bars[1].set_height(e2)
             self.order_bars[2].set_height(e3)
 
-            c1 = "#f87171" if e1 >= 10.0 else "#2dd4bf"
-            c2 = "#e879f9" if e2 > 12.0 else "#38bdf8"
+            c1 = "#ef4444" if (e1 > 18.0 and dyn_vib_g >= 0.14) else ("#f59e0b" if (e1 > 10.0 and dyn_vib_g >= 0.10) else "#00ffcc")
+            c2 = "#e879f9" if e2 > 12.0 else ("#a855f7" if e2 > 6.0 else "#38bdf8")
             c3 = "#f43f5e" if e3 > 10.0 else "#64748b"
 
             self.order_bars[0].set_color(c1)
             self.order_bars[1].set_color(c2)
             self.order_bars[2].set_color(c3)
 
-            lbl_pad = y_top_ord * 0.03
-            self.bar_labels[0].set_position((0, e1 + lbl_pad))
+            self.bar_labels[0].set_position((0, max(2.0, e1 + 2.0)))
             self.bar_labels[0].set_text(f"{e1:.1f}%")
-            self.bar_labels[1].set_position((1, e2 + lbl_pad))
+            self.bar_labels[1].set_position((1, max(2.0, e2 + 2.0)))
             self.bar_labels[1].set_text(f"{e2:.1f}%")
-            self.bar_labels[2].set_position((2, e3 + lbl_pad))
+            self.bar_labels[2].set_position((2, max(2.0, e3 + 2.0)))
             self.bar_labels[2].set_text(f"{e3:.1f}%")
 
-            # 8. Multimodal Motor Diagnostics Card (gs_right[2, 0])
+            # 8. Multimodal Motor Health & Diagnostic HUD Text (gs[1, 3])
             dir_str = "CENTER" if abs(target_angle) < 6.0 else ("RIGHT" if target_angle > 0 else "LEFT")
-            port_label = str(telemetry.get("port", getattr(self.current_source, "port", "COM8")))
+            lock_badge = f"* LOCKED ({dir_str})" if is_locked else "SEARCHING / SCANNING..."
+            invert_badge = "INVERTED (Key 'I')" if self.invert_channels else "NORMAL (Key 'I')"
+            port_label = str(telemetry.get("port", getattr(self.current_source, "port", "ESP32")))
             if port_label == "auto":
-                port_label = "COM8"
+                port_label = "ESP32"
+            hw_badge = f"STREAMING ({port_label})" if hw_alive else "STANDBY / SIMULATION"
 
-            # Motor Health Index Display + Progress Bar
+            def make_vu_bar(pct, width=12):
+                filled = int(round((pct / 100.0) * width))
+                filled = max(0, min(width, filled))
+                return "█" * filled + "░" * (width - filled)
+
+            db_l = 20.0 * math.log10(max(intensity_l, 1e-4))
+            db_c = 20.0 * math.log10(max(intensity_c, 1e-4))
+            db_r = 20.0 * math.log10(max(intensity_r, 1e-4))
+
+            dom_tag = {
+                "LEFT": "LEFT FLANK",
+                "CENTER": "FRONT CENTER",
+                "RIGHT": "RIGHT FLANK"
+            }.get(dom_s, "") if is_active_sound else "QUIET IDLE"
+
+            # Motor Health Index Display
             if not is_running:
-                h_score = 0.0
-                h_score_str = "--.-%"
-                h_status = "STANDBY"
-                h_col = "#64748b"
+                h_bar = "░" * 12
+                h_score_str = " --.-%"
+                h_status = "STANDBY (STOPPED)"
             else:
                 h_score = float(motor_diag["health_score"])
-                h_score_str = f"{h_score:.1f}%"
+                h_bar = make_vu_bar(h_score, width=12)
+                h_score_str = f"{h_score:5.1f}%"
                 if h_score >= 85:
                     h_status = "EXCELLENT"
-                    h_col = "#2dd4bf"
                 elif h_score >= 65:
                     h_status = "PERMISSIBLE"
-                    h_col = "#a3e635"
                 elif h_score >= 40:
                     h_status = "WARNING"
-                    h_col = "#f59e0b"
                 else:
                     h_status = "CRITICAL"
-                    h_col = "#ff0055"
-
-            self.health_score_text.set_text(h_score_str)
-            self.health_score_text.set_color(h_col)
-            self.health_status_text.set_text(h_status)
-            self.health_status_text.set_color(h_col)
-            fill_x = 0.05 + 0.90 * max(0.0, min(1.0, h_score / 100.0))
-            self.health_bar_fill.set_data([0.05, fill_x], [0.76, 0.76])
-            self.health_bar_fill.set_color(h_col)
 
             # Baseline Status Line
             if motor_diag["baseline_locked"]:
                 d = motor_diag["delta"]
                 base_str = f"LOCKED (ΔVib:{d['d_vib_g']:+.2f}g, ΔRPM:{d['d_rpm']:+.0f})"
             else:
-                base_str = "UNLOCKED · press B to learn"
+                base_str = "UNLOCKED [Press 'B' to Learn]"
 
             mode_tag = self._get_evidence_mode_tag()
             self.title_text.set_text(
                 f"MINOR PROJECT VISION: [VIBRATION + 4-MIC ARRAY + RPM]  ►  ANSWERS 'WHAT IS WRONG?' & 'WHERE IS IT?'  |  [{mode_tag}]"
             )
 
-            f0_str = f"{motor_diag['f0_hz']:.1f} Hz" if is_running else "IDLE"
+            f0_str = f"{motor_diag['f0_hz']:.1f}Hz" if is_running else "IDLE"
             if self.demo_profile_idx > 0:
                 adxl_short = "DEMO (400Hz SIM)"
             else:
-                num_v_smp = telemetry.get("num_vib_last", 5)
-                adxl_short = f"ONLINE (FIFO) · {num_v_smp} smp" if telemetry.get("adxl_hw_ok", False) else "CHECK I2C"
+                adxl_short = "ONLINE (FIFO)" if telemetry.get("adxl_hw_ok", False) else "CHECK I2C"
             iso_short = motor_diag["iso_severity"].split(":")[0]
-            calib_short = "ACTIVE" if self.apply_calibration else "BYPASS"
+            calib_short = "ON" if self.apply_calibration else "RAW"
             vad_short = "ACTIVE" if is_active_sound else "QUIET"
 
-            # Update Diagnosis Headline
+            # Update Card 1: WHAT IS WRONG?
             fault_str = str(motor_diag["primary_fault"])
             if "DISTURBANCE" in fault_str:
-                what_text = f"ACOUSTIC DISTURBANCE DETECTED (Vibration Nominal\n→ Non-Mechanical)"
-                what_col = "#f8fafc"
+                what_title = "ACOUSTIC DISTURBANCE (NON-MECHANICAL)"
+                what_sub = f"Vib Nominal ({dyn_vib_g:.3f}g {iso_short}) -> Motor OK!"
+                what_col = "#ffaa00"
             elif not is_running:
-                what_text = "MOTOR STOPPED / STANDBY\nAwaiting shaft rotation..."
+                what_title = "MOTOR STOPPED / STANDBY"
+                what_sub = f"Vib: {dyn_vib_g:.3f}g | Awaiting Shaft Rotation"
                 what_col = "#94a3b8"
             elif "NOMINAL" in fault_str:
-                what_text = f"NOMINAL / HEALTHY MOTOR\nVibration {dyn_vib_g:.3f} g ({iso_short})"
-                what_col = "#2dd4bf"
+                what_title = "NOMINAL / HEALTHY MOTOR"
+                what_sub = f"Health: {h_score_str} | Vib: {dyn_vib_g:.3f}g ({iso_short})"
+                what_col = "#00ffcc"
             else:
-                what_text = f"{fault_str[:46]}\nHealth {h_score_str} ({h_status}) · {iso_short}"
+                what_title = fault_str[:36]
+                what_sub = f"Health: {h_score_str} ({h_status}) | {iso_short}"
                 what_col = "#ff0055"
 
-            self.what_box_text.set_text(what_text)
-            self.what_box_text.set_color(what_col)
+            if hasattr(self, "what_box_text"):
+                self.what_box_text.set_text(f"WHAT IS WRONG?  ►  {what_title}\n{what_sub}")
+                self.what_box_text.set_color(what_col)
+                self.what_box_text.get_bbox_patch().set_edgecolor(what_col)
 
-            doa_str = f"{target_angle:+.1f}° {dir_str} · FRONT {dir_str}" if is_source_valid else "SCANNING / IDLE"
+            # Update Card 2: WHERE IS THE SOUND?
+            if is_source_valid:
+                where_title = f"DOA: {target_angle:+5.1f}° [{dir_str} FLANK]"
+                where_sub = f"Left:{pct_l:3.0f}% | Center:{pct_c:3.0f}% | Right:{pct_r:3.0f}%"
+                where_col = "#00ffcc" if is_locked else "#ffaa00"
+            elif is_active_sound:
+                where_title = "SOUND PRESENT (DIFFUSE / UNRESOLVED)"
+                where_sub = f"Gate: {side_metrics.get('status', 'SPATIAL GATE')[:28]}"
+                where_col = "#ffaa00"
+            else:
+                where_title = "QUIET AMBIENT FIELD (NO TARGET)"
+                where_sub = f"Noise Floor: {self.noise_floor:.4f} | 6-Pair SRP Idle"
+                where_col = "#64748b"
+
+            if hasattr(self, "where_box_text"):
+                self.where_box_text.set_text(f"WHERE IS IT?  ►  {where_title}\n{where_sub}")
+                self.where_box_text.set_color(where_col)
+                self.where_box_text.get_bbox_patch().set_edgecolor(where_col)
+
+            port_label = str(telemetry.get("port", "COM8"))
             hud_lines = [
-                f"BASELINE   {base_str[:34]}",
-                f"TACH       {rpm:,.0f} RPM · f0 {f0_str} · PPR {self.pulses_per_rev}",
-                f"ADXL345    {adxl_short}",
-                f"VIBRATION  a_dyn {dyn_vib_g:.3f} g · {motor_diag.get('v_rms_mms', 0.0):.2f} mm/s · {iso_short}",
-                f"ACOUSTIC   Kurtosis {motor_diag['kurtosis']:.2f} · Crest {motor_diag['crest_factor']:.1f}",
-                f"ORDERS     1X {e1:.1f}% · 2X {e2:.1f}% · 3X {e3:.1f}%",
-                f"DOA        {doa_str[:34]}",
-                f"FLANKS     L {pct_l:.1f}% · C {pct_c:.1f}% · R {pct_r:.1f}%",
-                f"LINK       {port_label} @ 921.6k · valid {telemetry.get('packets_valid', 0)} · drop {telemetry.get('dropped_packets', 0)}",
-                f"CALIB/VAD  Phase {calib_short} · VAD {vad_short} · floor {self.noise_floor:.4f}",
+                f" [HEALTH]   [{h_bar}] {h_score_str} ({h_status})",
+                f" [BASELINE] {base_str[:34]}",
+                f" [S1: TACH] {rpm:5.0f} RPM ({f0_str}) | Pulses:{pulses} (PPR:{self.pulses_per_rev})",
+                f" [S2: VIB]  {adxl_short} | a_dyn:{dyn_vib_g:.3f}g | {motor_diag.get('v_rms_mms', 0.0):.2f}mm/s",
+                f" [S3: ACOU] Kurtosis:{motor_diag['kurtosis']:5.2f} | Crest:{motor_diag['crest_factor']:4.1f} | VAD:{vad_short}",
+                f" [S4: ORDR] 1X:{e1:4.1f}% | 2X:{e2:4.1f}% | 3X:{e3:4.1f}%",
+                f" [SERIAL]   {port_label} @ 921.6k | OK:{telemetry.get('packets_valid', 0)} Drop:{telemetry.get('dropped_packets', 0)} Cal:{calib_short}",
+                " --------------------------------------------",
+                " KEYS: [B] Lock Base [C] Clear [P] PPR [T] Demo",
+                "       [1] Laptop [2] ESP32 [K] Cal [I] Flip"
             ]
             self.hud_text.set_text("\n".join(hud_lines))
 
@@ -3211,6 +3014,12 @@ class AcousticRadarApp:
             blit=False,
             cache_frame_data=False
         )
+        # Force canvas keyboard focus immediately on Qt backend (Windows fix)
+        # Without this the Qt window never receives key_press_event
+        try:
+            self.fig.canvas.setFocus()
+        except Exception:
+            pass
         plt.show()
 
 
@@ -3220,17 +3029,15 @@ class AcousticRadarApp:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Spatial Multimodal Acoustic Radar Engine (Pro V6)")
-    parser.add_argument("--port", type=str, default="auto", help="ESP32 serial port (default: auto)")
+    parser.add_argument("--port", type=str, default="COM8", help="ESP32 serial port (default: COM8)")
     parser.add_argument("--baud", type=int, default=921600, help="Serial baudrate (default: 921600)")
     parser.add_argument("--ppr", "--pulses-per-rev", type=int, default=1, help="Tachometer pulses per revolution (default: 1 for single blade, 20 for slotted disc)")
-    parser.add_argument("--source", type=str, default="auto", choices=["auto", "esp32", "laptop", "synthetic"], help="Input source: auto, esp32, laptop (mic), synthetic (simulator)")
-    parser.add_argument("--rpm", type=float, default=0.0, help="Initial shaft RPM for simulator mode (default: 24000.0)")
     args, _ = parser.parse_known_args()
 
     print("=====================================================================")
     print(" SPATIAL MULTIMODAL ACOUSTIC RADAR ENGINE (PRO V6)")
     print(" 4-Microphone Uniform Linear Array + Multimodal Fault Localization")
-    print(f" Source Mode : {args.source.upper()} | Port: {args.port} @ {args.baud} Baud | PPR: {args.ppr}")
+    print(f" Target Serial Port: {args.port} @ {args.baud} Baud | PPR: {args.ppr}")
     print("=====================================================================")
     print(" Physical Array Mapping on Breadboard:")
     print("   [Mic 1] (Row 20, Pair A Left,  GPIO 19, L/R->GND) -> x = -30.48 mm")
@@ -3240,6 +3047,5 @@ if __name__ == "__main__":
     print(" Total Array Aperture: 60.96 mm | 6 Correlation Delay Pairs")
     print(" ADXL345: SDA=TX2 (GPIO 17), SCL=RX2 (GPIO 16) | FC-03: DO=D4 (GPIO 4)")
     print("=====================================================================")
-    app = AcousticRadarApp(port=args.port, baud=args.baud, pulses_per_rev=args.ppr,
-                           source=args.source, initial_rpm=args.rpm)
+    app = AcousticRadarApp(port=args.port, baud=args.baud, pulses_per_rev=args.ppr)
     app.run()
