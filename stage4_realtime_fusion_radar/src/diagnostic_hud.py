@@ -34,7 +34,7 @@ from spatial_acoustic_radar_pro import (
 
 class DiagnosticHUDApp:
     def __init__(self, port: str = "auto", baud: int = 921600, pulses_per_rev: int = 1,
-                 source: str = "auto", initial_rpm: float = 24000.0):
+                 source: str = "auto", initial_rpm: float = 0.0):
         self.port = port
         self.baud = baud
         self.pulses_per_rev = max(1, int(pulses_per_rev))
@@ -233,7 +233,7 @@ class DiagnosticHUDApp:
         pulses = int(telem.get("rpm_pulses", 0))
         raw_rpm = float(telem.get("estimated_rpm", 0.0))
         if self.active_source_type == "SYNTHETIC":
-            rpm = float(getattr(self.sources["SYNTHETIC"], "target_rpm", 24000.0))
+            rpm = float(getattr(self.sources["SYNTHETIC"], "target_rpm", 0.0))
         else:
             rpm = raw_rpm / max(1, self.pulses_per_rev)
 
@@ -334,7 +334,7 @@ def main():
     parser.add_argument("--baud", type=int, default=921600, help="Baud rate (default: 921600)")
     parser.add_argument("--ppr", type=int, default=1, help="Pulses per revolution (default: 1)")
     parser.add_argument("--source", type=str, default="auto", choices=["auto", "esp32", "laptop", "synthetic"], help="Source mode")
-    parser.add_argument("--rpm", type=float, default=24000.0, help="Initial RPM for simulator mode (default: 24000.0)")
+    parser.add_argument("--rpm", type=float, default=0.0, help="Initial RPM for simulator mode (default: 24000.0)")
     args, _ = parser.parse_known_args()
 
     app = DiagnosticHUDApp(port=args.port, baud=args.baud, pulses_per_rev=args.ppr,

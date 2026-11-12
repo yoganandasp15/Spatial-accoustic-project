@@ -97,7 +97,7 @@ if "%STREAMING_PORT%"=="NONE" (
     echo      (All 7 panels active! Press [UP]/[DOWN] or [+][-] to change RPM)
     echo      (Press '1' anytime inside the GUI to switch to Laptop Microphone)
     echo.
-    "%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py" --source synthetic --rpm 24000 %*
+    "%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py" --source synthetic --rpm 0 %*
 ) else (
     echo  [+] Launching Live Hardware Radar on %STREAMING_PORT%...
     echo.
@@ -116,14 +116,14 @@ goto :check_exit
 echo  [+] Launching High-Speed Motor Simulator Mode (24,000 RPM baseline)...
 echo      (Press [UP]/[DOWN] or [+][-] to dynamically change RPM from 1k to 100k+ RPM)
 echo.
-"%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py" --source synthetic --rpm 24000 %*
+"%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py" --source synthetic --rpm 0 %*
 goto :check_exit
 
 :launch_diag
 echo  [+] Launching Compact Diagnostic HUD...
 echo.
 if "%STREAMING_PORT%"=="NONE" (
-    "%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\diagnostic_hud.py" --source synthetic --rpm 24000 %*
+    "%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\diagnostic_hud.py" --source synthetic --rpm 0 %*
 ) else (
     "%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\diagnostic_hud.py" --source esp32 --port %STREAMING_PORT% %*
 )

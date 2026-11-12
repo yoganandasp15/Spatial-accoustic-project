@@ -1788,7 +1788,7 @@ class Synthetic4ChSource(AudioSourceBase):
     harmonic acoustic signature synthesis (1X, 2X, 3X, BPF), and 3-axis ADXL345 dynamic vibration.
     """
 
-    def __init__(self, fs: float = 16000.0, target_rpm: float = 24000.0, ppr: int = 1):
+    def __init__(self, fs: float = 16000.0, target_rpm: float = 0.0, ppr: int = 1):
         self.fs = fs
         self.channels = 4
         self.frame_len = 512
@@ -1823,6 +1823,12 @@ class Synthetic4ChSource(AudioSourceBase):
         dt = self.frame_len / self.fs
         t = np.arange(self.frame_len) / self.fs + self.t_phase
         self.t_phase += dt
+
+        if cur_rpm <= 0.0:
+            # Motor is stationary (0 RPM): no pulse accumulation, no synthetic tones
+            out = (0.012 * np.random.randn(self.frame_len, 4)).astype(np.float32)
+            self.cached_frame = out.copy()
+            return out
 
         # Pulse Accumulator: pulse rate f_p = (RPM / 60) * PPR
         pulse_delta = (cur_rpm / 60.0) * cur_ppr * dt
@@ -1868,10 +1874,13 @@ class Synthetic4ChSource(AudioSourceBase):
             cur_pulses = self.pulses
             cur_ppr = self.ppr
 
-        f0 = cur_rpm / 60.0
-        vib_x = 0.18 * math.sin(2.0 * math.pi * min(f0, 180.0) * self.t_phase)
-        vib_y = 0.22 * math.cos(2.0 * math.pi * min(f0, 180.0) * self.t_phase)
-        vib_z = -0.82 + 0.10 * math.sin(4.0 * math.pi * min(f0, 180.0) * self.t_phase)
+        f0 = cur_rpm / 60.0 if cur_rpm > 0 else 0.0
+        if cur_rpm <= 0.0:
+            vib_x, vib_y, vib_z = 0.0, 0.0, -0.82
+        else:
+            vib_x = 0.18 * math.sin(2.0 * math.pi * min(f0, 180.0) * self.t_phase)
+            vib_y = 0.22 * math.cos(2.0 * math.pi * min(f0, 180.0) * self.t_phase)
+            vib_z = -0.82 + 0.10 * math.sin(4.0 * math.pi * min(f0, 180.0) * self.t_phase)
 
         rms_counts = [
             float(np.sqrt(np.mean(self.cached_frame[:, i]**2)) * 12000.0) for i in range(4)
@@ -2004,7 +2013,7 @@ class LaptopAudioSource(AudioSourceBase):
 class AcousticRadarApp:
     """Master Interactive HUD with 4-Microphone Live Inputs and Multimodal Telemetry."""
 
-    def __init__(self, port: str = "auto", baud: int = 921600, pulses_per_rev: int = 1, source: str = "auto", initial_rpm: float = 24000.0):
+    def __init__(self, port: str = "auto", baud: int = 921600, pulses_per_rev: int = 1, source: str = "auto", initial_rpm: float = 0.0):
         self.sources: Dict[str, AudioSourceBase] = {
             "ESP32": ESP32MultimodalSource(port=port, baudrates=(baud, 921600, 1152000, 115200)),
             "SYNTHETIC": Synthetic4ChSource(target_rpm=initial_rpm, ppr=pulses_per_rev),
@@ -2140,7 +2149,7 @@ class AcousticRadarApp:
             return f"DEMO MODE: {self.demo_profiles[self.demo_profile_idx]} (Press 'T' for Live)"
         if self.active_source_type == "SYNTHETIC":
             synth_src = self.sources.get("SYNTHETIC")
-            tgt_rpm = getattr(synth_src, "target_rpm", 24000.0)
+            tgt_rpm = getattr(synth_src, "target_rpm", 0.0)
             return f"SIMULATOR: {tgt_rpm:,.0f} RPM (f0={tgt_rpm/60.0:.1f}Hz) | Controls: [UP/DN] or [+/-]"
         if self.active_source_type == "LAPTOP":
             lap_src = self.sources.get("LAPTOP")
@@ -3215,7 +3224,7 @@ if __name__ == "__main__":
     parser.add_argument("--baud", type=int, default=921600, help="Serial baudrate (default: 921600)")
     parser.add_argument("--ppr", "--pulses-per-rev", type=int, default=1, help="Tachometer pulses per revolution (default: 1 for single blade, 20 for slotted disc)")
     parser.add_argument("--source", type=str, default="auto", choices=["auto", "esp32", "laptop", "synthetic"], help="Input source: auto, esp32, laptop (mic), synthetic (simulator)")
-    parser.add_argument("--rpm", type=float, default=24000.0, help="Initial shaft RPM for simulator mode (default: 24000.0)")
+    parser.add_argument("--rpm", type=float, default=0.0, help="Initial shaft RPM for simulator mode (default: 24000.0)")
     args, _ = parser.parse_known_args()
 
     print("=====================================================================")
