@@ -1,0 +1,1094 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spatial Multimodal Acoustic Radar 3D (Pro V7) — Digital Twin & Volumetric Beamformer</title>
+  <!-- Three.js + OrbitControls from cdnjs with fallback -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <style>
+    :root {
+      --bg-dark: #07090e;
+      --panel-bg: rgba(13, 17, 26, 0.88);
+      --panel-border: rgba(40, 60, 95, 0.45);
+      --cyan-accent: #00f0ff;
+      --green-accent: #00ff88;
+      --yellow-accent: #ffcc00;
+      --red-accent: #ff3355;
+      --text-main: #e2e8f0;
+      --text-dim: #94a3b8;
+      --hud-font: 'JetBrains Mono', 'Segoe UI Mono', monospace;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+    body {
+      background: var(--bg-dark);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+    }
+    #viewport-container {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 1;
+    }
+    canvas#three-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    /* Overlay HUD Layout */
+    .hud-layer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 10;
+      pointer-events: none;
+      display: grid;
+      grid-template-columns: 360px 1fr 390px;
+      grid-template-rows: 64px 1fr 240px;
+      padding: 14px;
+      gap: 14px;
+    }
+    .hud-panel {
+      pointer-events: auto;
+      background: var(--panel-bg);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--panel-border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+      transition: border-color 0.2s ease;
+    }
+    .hud-panel:hover {
+      border-color: rgba(0, 240, 255, 0.6);
+    }
+    /* Header */
+    .hud-header {
+      grid-column: 1 / -1;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0 16px;
+    }
+    .hud-title-group h1 {
+      font-size: 1.05rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: var(--cyan-accent);
+      text-transform: uppercase;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .badge {
+      font-size: 0.65rem;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .badge-pro {
+      background: rgba(0, 240, 255, 0.15);
+      border: 1px solid var(--cyan-accent);
+      color: var(--cyan-accent);
+    }
+    .badge-status {
+      background: rgba(0, 255, 136, 0.15);
+      border: 1px solid var(--green-accent);
+      color: var(--green-accent);
+    }
+    .header-metrics {
+      display: flex;
+      gap: 20px;
+      font-family: var(--hud-font);
+      font-size: 0.8rem;
+    }
+    .metric-pill {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+    }
+    .metric-label {
+      font-size: 0.65rem;
+      color: var(--text-dim);
+      text-transform: uppercase;
+    }
+    .metric-val {
+      font-weight: 700;
+      color: #fff;
+    }
+    /* Left Column: Diagnostics & Controls */
+    .left-col {
+      grid-column: 1;
+      grid-row: 2;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      overflow-y: auto;
+    }
+    .section-title {
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-dim);
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding-bottom: 4px;
+    }
+    .ctrl-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .ctrl-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.75rem;
+    }
+    .ctrl-row label {
+      color: var(--text-dim);
+    }
+    .ctrl-row span {
+      font-family: var(--hud-font);
+      font-weight: 700;
+      color: var(--cyan-accent);
+    }
+    input[type="range"] {
+      width: 100%;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 2px;
+      appearance: none;
+      outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      appearance: none;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--cyan-accent);
+      cursor: pointer;
+      box-shadow: 0 0 8px var(--cyan-accent);
+    }
+    /* ISO 10816 Severity Indicator */
+    .iso-container {
+      margin-top: 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .iso-bar {
+      display: flex;
+      height: 10px;
+      border-radius: 3px;
+      overflow: hidden;
+      gap: 2px;
+      background: rgba(0, 0, 0, 0.5);
+    }
+    .iso-seg {
+      flex: 1;
+      opacity: 0.25;
+      transition: opacity 0.2s, box-shadow 0.2s;
+    }
+    .iso-seg.seg-a { background: #00ff88; }
+    .iso-seg.seg-b { background: #ffcc00; }
+    .iso-seg.seg-c { background: #ff7700; }
+    .iso-seg.seg-d { background: #ff2244; }
+    .iso-seg.active {
+      opacity: 1.0;
+      box-shadow: 0 0 10px currentColor;
+    }
+    .iso-label-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.65rem;
+      font-family: var(--hud-font);
+      color: var(--text-dim);
+    }
+    /* Right Column: 2D Polar Radar & 3D Focal Readout */
+    .right-col {
+      grid-column: 3;
+      grid-row: 2;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .radar-canvas-container {
+      position: relative;
+      width: 100%;
+      height: 220px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    canvas#polar-canvas {
+      width: 100%;
+      height: 100%;
+      border-radius: 6px;
+    }
+    .radar-telemetry {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      font-family: var(--hud-font);
+      font-size: 0.72rem;
+      margin-top: 4px;
+    }
+    .telem-box {
+      background: rgba(0, 0, 0, 0.35);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 4px;
+      padding: 6px 8px;
+    }
+    .telem-box .k {
+      color: var(--text-dim);
+      font-size: 0.62rem;
+      text-transform: uppercase;
+    }
+    .telem-box .v {
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: #fff;
+    }
+    /* Bottom Bar: Oscilloscope & Spectrum */
+    .bottom-bar {
+      grid-column: 1 / -1;
+      grid-row: 3;
+      display: grid;
+      grid-template-columns: 1fr 1fr 340px;
+      gap: 12px;
+    }
+    .graph-panel {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+    }
+    .graph-panel canvas {
+      width: 100%;
+      flex: 1;
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.45);
+    }
+    /* Mode & 3D View Controls */
+    .view-controls {
+      position: absolute;
+      bottom: 265px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 15;
+      display: flex;
+      gap: 8px;
+      pointer-events: auto;
+    }
+    .btn {
+      background: rgba(13, 17, 26, 0.9);
+      border: 1px solid var(--panel-border);
+      color: var(--text-main);
+      font-family: var(--hud-font);
+      font-size: 0.7rem;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      backdrop-filter: blur(8px);
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn:hover {
+      border-color: var(--cyan-accent);
+      color: var(--cyan-accent);
+      box-shadow: 0 0 10px rgba(0, 240, 255, 0.3);
+    }
+    .btn.active {
+      background: rgba(0, 240, 255, 0.2);
+      border-color: var(--cyan-accent);
+      color: #fff;
+    }
+  </style>
+</head>
+<body>
+  <!-- 3D Three.js Viewport -->
+  <div id="viewport-container">
+    <canvas id="three-canvas"></canvas>
+  </div>
+
+  <!-- 3D Camera Preset Buttons -->
+  <div class="view-controls">
+    <button class="btn active" id="btn-view-iso" onclick="setView('iso')">Isometric 3D</button>
+    <button class="btn" id="btn-view-top" onclick="setView('top')">Top Ortho</button>
+    <button class="btn" id="btn-view-front" onclick="setView('front')">Front Array</button>
+    <button class="btn" id="btn-view-side" onclick="setView('side')">Side Elevation</button>
+    <button class="btn" id="btn-toggle-heat" onclick="toggleHeatCloud()">Toggle 3D Heat</button>
+  </div>
+
+  <!-- HUD Overlay Layer -->
+  <div class="hud-layer">
+    <!-- Top Header -->
+    <header class="hud-panel hud-header">
+      <div class="hud-title-group">
+        <h1>
+          Spatial Multimodal Radar 3D
+          <span class="badge badge-pro">PRO V7 DIGITAL TWIN</span>
+          <span class="badge badge-status" id="live-indicator">LIVE SIMULATION</span>
+        </h1>
+      </div>
+      <div class="header-metrics">
+        <div class="metric-pill">
+          <span class="metric-label">Sampling Rate</span>
+          <span class="metric-val">10 kHz 4-CH PCM</span>
+        </div>
+        <div class="metric-pill">
+          <span class="metric-label">Array Baseline</span>
+          <span class="metric-val">60.96 mm ULA</span>
+        </div>
+        <div class="metric-pill">
+          <span class="metric-label">Processing Loop</span>
+          <span class="metric-val">Near-Field Spherical SRP</span>
+        </div>
+        <div class="metric-pill">
+          <span class="metric-label">Render Engine</span>
+          <span class="metric-val" id="fps-display">60 FPS WebGL</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Left Controls Panel -->
+    <aside class="hud-panel left-col">
+      <div class="section-title">
+        <span>Hardware Simulation Controls</span>
+        <span>MOD 0x05</span>
+      </div>
+      <div class="ctrl-group">
+        <div class="ctrl-row">
+          <label for="slider-rpm">Motor Speed</label>
+          <span id="val-rpm">1800 RPM</span>
+        </div>
+        <input type="range" id="slider-rpm" min="300" max="3600" step="25" value="1800" oninput="updateSimParams()" />
+
+        <div class="ctrl-row">
+          <label for="slider-bearing">Acoustic Azimuth</label>
+          <span id="val-bearing">+25.0°</span>
+        </div>
+        <input type="range" id="slider-bearing" min="-85" max="85" step="1" value="25" oninput="updateSimParams()" />
+
+        <div class="ctrl-row">
+          <label for="slider-elev">Acoustic Elevation</label>
+          <span id="val-elev">+12.0°</span>
+        </div>
+        <input type="range" id="slider-elev" min="-40" max="40" step="1" value="12" oninput="updateSimParams()" />
+
+        <div class="ctrl-row">
+          <label for="slider-range">Source Distance</label>
+          <span id="val-range">1.20 m</span>
+        </div>
+        <input type="range" id="slider-range" min="0.3" max="3.0" step="0.05" value="1.20" oninput="updateSimParams()" />
+
+        <div class="ctrl-row">
+          <label for="slider-unbalance">Shaft Unbalance Severity</label>
+          <span id="val-unbalance">0.45 g</span>
+        </div>
+        <input type="range" id="slider-unbalance" min="0.02" max="2.0" step="0.02" value="0.45" oninput="updateSimParams()" />
+
+        <div class="ctrl-row">
+          <label for="slider-fault">Bearing Defect (BPFO Impulses)</label>
+          <span id="val-fault">Moderate</span>
+        </div>
+        <input type="range" id="slider-fault" min="0" max="3" step="1" value="1" oninput="updateSimParams()" />
+      </div>
+
+      <div class="section-title" style="margin-top: 14px;">
+        <span>ISO 10816 Vibration Severity</span>
+        <span id="iso-status-text" style="color: #00ff88;">CLASS I / GOOD</span>
+      </div>
+      <div class="iso-container">
+        <div class="iso-bar">
+          <div class="iso-seg seg-a active" id="seg-a"></div>
+          <div class="iso-seg seg-b" id="seg-b"></div>
+          <div class="iso-seg seg-c" id="seg-c"></div>
+          <div class="iso-seg seg-d" id="seg-d"></div>
+        </div>
+        <div class="iso-label-row">
+          <span>Good (&lt;0.71)</span>
+          <span>Satisfactory</span>
+          <span>Alert (&gt;1.8)</span>
+          <span>Danger (&gt;4.5)</span>
+        </div>
+      </div>
+
+      <div class="section-title" style="margin-top: 14px;">
+        <span>Bearing Kinematic Frequencies</span>
+        <span>SKF 6202</span>
+      </div>
+      <div class="radar-telemetry">
+        <div class="telem-box">
+          <div class="k">1X Shaft Fundamental</div>
+          <div class="v" id="txt-1x">30.0 Hz</div>
+        </div>
+        <div class="telem-box">
+          <div class="k">BPFO Outer Race</div>
+          <div class="v" id="txt-bpfo">91.8 Hz</div>
+        </div>
+        <div class="telem-box">
+          <div class="k">BPFI Inner Race</div>
+          <div class="v" id="txt-bpfi">148.2 Hz</div>
+        </div>
+        <div class="telem-box">
+          <div class="k">BSF Ball Spin</div>
+          <div class="v" id="txt-bsf">58.4 Hz</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Right Polar Radar Panel -->
+    <aside class="hud-panel right-col">
+      <div class="section-title">
+        <span>Polar Acoustic Radar & Target-Lock</span>
+        <span style="color: var(--cyan-accent);">SRP-PHAT</span>
+      </div>
+      <div class="radar-canvas-container">
+        <canvas id="polar-canvas"></canvas>
+      </div>
+      <div class="radar-telemetry">
+        <div class="telem-box">
+          <div class="k">Detected Azimuth (θ)</div>
+          <div class="v" id="telem-azimuth">+24.8°</div>
+        </div>
+        <div class="telem-box">
+          <div class="k">Detected Elevation (φ)</div>
+          <div class="v" id="telem-elevation">+11.9°</div>
+        </div>
+        <div class="telem-box">
+          <div class="k">Spherical Range (r)</div>
+          <div class="v" id="telem-range">1.21 m</div>
+        </div>
+        <div class="telem-box">
+          <div class="k">GCC Peak Prominence</div>
+          <div class="v" id="telem-prom">2.84 SNR</div>
+        </div>
+        <div class="telem-box">
+          <div class="k">Spatial Coherence (ρ)</div>
+          <div class="v" id="telem-rho">0.88 HIGH</div>
+        </div>
+        <div class="telem-box">
+          <div class="k">Target-Lock Status</div>
+          <div class="v" id="telem-lock" style="color: #00ff88;">LOCKED (96%)</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Bottom Signal Stream Panel -->
+    <footer class="hud-panel bottom-bar">
+      <!-- 4-Channel Live Oscilloscope -->
+      <div class="graph-panel">
+        <div class="section-title">
+          <span>4-Channel Microphone Array Oscilloscope</span>
+          <span>10 kHz I2S</span>
+        </div>
+        <canvas id="osc-canvas"></canvas>
+      </div>
+
+      <!-- FFT Order-Tracking Spectrum -->
+      <div class="graph-panel">
+        <div class="section-title">
+          <span>Vibration Order Tracking FFT Spectrum</span>
+          <span>1X / 2X / 3X Harmonics</span>
+        </div>
+        <canvas id="fft-canvas"></canvas>
+      </div>
+
+      <!-- 3D Orbit Lissajous Display -->
+      <div class="graph-panel">
+        <div class="section-title">
+          <span>Dynamic Shaft Orbit (X-Y Plane)</span>
+          <span>ADXL345 400Hz</span>
+        </div>
+        <canvas id="orbit-canvas"></canvas>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Application Logic & 3D Three.js Pipeline -->
+  <script>
+    // --- 1. System Parameters & State ---
+    const simState = {
+      rpm: 1800,
+      targetAzimuth: 25.0,
+      targetElevation: 12.0,
+      targetRange: 1.20,
+      unbalanceG: 0.45,
+      bearingFaultLevel: 1,
+      showHeatCloud: true,
+      cameraPreset: 'iso'
+    };
+
+    // --- 2. Three.js Scene Setup ---
+    const container = document.getElementById('viewport-container');
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x07090e, 0.08);
+
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 50.0);
+    camera.position.set(0, 2.2, 3.4);
+
+    const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('three-canvas'), antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.target.set(0, 0.3, 0.8);
+    controls.maxPolarAngle = Math.PI / 2 + 0.1;
+
+    // Lighting
+    const ambLight = new THREE.AmbientLight(0xffffff, 0.4);
+    scene.add(ambLight);
+
+    const dirLight = new THREE.DirectionalLight(0x00f0ff, 1.2);
+    dirLight.position.set(2, 4, 3);
+    scene.add(dirLight);
+
+    const dirLight2 = new THREE.DirectionalLight(0xff0066, 0.6);
+    dirLight2.position.set(-3, 2, -2);
+    scene.add(dirLight2);
+
+    // Ground Plane & Concentric Range Grid
+    const gridHelper = new THREE.GridHelper(6, 30, 0x00f0ff, 0x1a2638);
+    gridHelper.position.y = -0.01;
+    scene.add(gridHelper);
+
+    // Add Concentric Acoustic Range Rings
+    for (let r = 0.5; r <= 3.0; r += 0.5) {
+      const ringGeo = new THREE.RingGeometry(r - 0.005, r + 0.005, 64);
+      const ringMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff, side: THREE.DoubleSide, transparent: true, opacity: 0.18 });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.rotation.x = -Math.PI / 2;
+      scene.add(ring);
+    }
+
+    // --- 3. Physical Microphone Array 3D Model ---
+    const arrayGroup = new THREE.Group();
+    // Breadboard base
+    const boardGeo = new THREE.BoxGeometry(0.18, 0.012, 0.06);
+    const boardMat = new THREE.MeshStandardMaterial({ color: 0x111622, roughness: 0.4, metalness: 0.7 });
+    const boardMesh = new THREE.Mesh(boardGeo, boardMat);
+    arrayGroup.add(boardMesh);
+
+    // 4 INMP441 Microphones at exact physical pitch: -30.48mm, -10.16mm, +10.16mm, +30.48mm
+    const micXOffsets = [-0.03048, -0.01016, 0.01016, 0.03048];
+    const micMeshes = [];
+    micXOffsets.forEach((x, idx) => {
+      const micGeo = new THREE.CylinderGeometry(0.004, 0.004, 0.008, 16);
+      const micMat = new THREE.MeshStandardMaterial({ color: 0xffcc00, metalness: 0.9, roughness: 0.2 });
+      const mic = new THREE.Mesh(micGeo, micMat);
+      mic.position.set(x, 0.008, 0);
+
+      // Capsule port indicator LED
+      const ledGeo = new THREE.SphereGeometry(0.0018, 8, 8);
+      const ledMat = new THREE.MeshBasicMaterial({ color: 0x00ff88 });
+      const led = new THREE.Mesh(ledGeo, ledMat);
+      led.position.set(x, 0.013, 0);
+      arrayGroup.add(mic);
+      arrayGroup.add(led);
+      micMeshes.push(led);
+    });
+    scene.add(arrayGroup);
+
+    // --- 4. Rotating Industrial Machinery (Motor CAD Representation) ---
+    const motorGroup = new THREE.Group();
+    // Stator Housing
+    const statorGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.16, 32);
+    const statorMat = new THREE.MeshStandardMaterial({ color: 0x1e2638, roughness: 0.3, metalness: 0.8 });
+    const stator = new THREE.Mesh(statorGeo, statorMat);
+    stator.rotation.z = Math.PI / 2;
+    motorGroup.add(stator);
+
+    // Motor Mount Foot
+    const footGeo = new THREE.BoxGeometry(0.14, 0.02, 0.12);
+    const footMat = new THREE.MeshStandardMaterial({ color: 0x0d121c, roughness: 0.6 });
+    const foot = new THREE.Mesh(footGeo, footMat);
+    foot.position.y = -0.08;
+    motorGroup.add(foot);
+
+    // Rotating Shaft
+    const shaftGeo = new THREE.CylinderGeometry(0.012, 0.012, 0.26, 24);
+    const shaftMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, metalness: 0.9, roughness: 0.1 });
+    const shaft = new THREE.Mesh(shaftGeo, shaftMat);
+    shaft.rotation.z = Math.PI / 2;
+    motorGroup.add(shaft);
+
+    // FC-03 Optical Tachometer Wheel
+    const tachoGeo = new THREE.CylinderGeometry(0.035, 0.035, 0.004, 20);
+    const tachoMat = new THREE.MeshStandardMaterial({ color: 0x00f0ff, metalness: 0.5, roughness: 0.2 });
+    const tacho = new THREE.Mesh(tachoGeo, tachoMat);
+    tacho.rotation.z = Math.PI / 2;
+    tacho.position.x = 0.10;
+    motorGroup.add(tacho);
+
+    // ADXL345 Sensor Node
+    const sensorGeo = new THREE.BoxGeometry(0.02, 0.01, 0.025);
+    const sensorMat = new THREE.MeshStandardMaterial({ color: 0x0033aa, roughness: 0.2 });
+    const sensor = new THREE.Mesh(sensorGeo, sensorMat);
+    sensor.position.set(0, 0.075, 0);
+    motorGroup.add(sensor);
+
+    scene.add(motorGroup);
+
+    // --- 5. Volumetric 3D Acoustic Heat Cloud ---
+    const heatCloudCount = 380;
+    const heatGeo = new THREE.BufferGeometry();
+    const heatPos = new Float32Array(heatCloudCount * 3);
+    const heatColors = new Float32Array(heatCloudCount * 3);
+
+    for (let i = 0; i < heatCloudCount; i++) {
+      heatPos[i * 3 + 0] = (Math.random() - 0.5) * 0.4;
+      heatPos[i * 3 + 1] = (Math.random() - 0.5) * 0.4;
+      heatPos[i * 3 + 2] = (Math.random() - 0.5) * 0.4;
+
+      heatColors[i * 3 + 0] = 1.0;
+      heatColors[i * 3 + 1] = 0.2;
+      heatColors[i * 3 + 2] = 0.1;
+    }
+    heatGeo.setAttribute('position', new THREE.BufferAttribute(heatPos, 3));
+    heatGeo.setAttribute('color', new THREE.BufferAttribute(heatColors, 3));
+
+    const heatMat = new THREE.PointsMaterial({
+      size: 0.045,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.75,
+      blending: THREE.AdditiveBlending
+    });
+    const heatCloud = new THREE.Points(heatGeo, heatMat);
+    scene.add(heatCloud);
+
+    // --- 6. 3D Wavefront Pulse Ray Lines ---
+    const rayGeo = new THREE.BufferGeometry();
+    const rayPoints = [new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 1)];
+    rayGeo.setFromPoints(rayPoints);
+    const rayMat = new THREE.LineBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.65 });
+    const beamLine = new THREE.Line(rayGeo, rayMat);
+    scene.add(beamLine);
+
+    // --- 7. Canvas Renderers (Oscilloscope, FFT, Radar) ---
+    const oscCanvas = document.getElementById('osc-canvas');
+    const oscCtx = oscCanvas.getContext('2d');
+    const fftCanvas = document.getElementById('fft-canvas');
+    const fftCtx = fftCanvas.getContext('2d');
+    const orbitCanvas = document.getElementById('orbit-canvas');
+    const orbitCtx = orbitCanvas.getContext('2d');
+    const polarCanvas = document.getElementById('polar-canvas');
+    const polarCtx = polarCanvas.getContext('2d');
+
+    function resizeCanvases() {
+      [oscCanvas, fftCanvas, orbitCanvas, polarCanvas].forEach(c => {
+        c.width = c.parentElement.clientWidth;
+        c.height = c.parentElement.clientHeight - 28;
+      });
+    }
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      resizeCanvases();
+    });
+    resizeCanvases();
+
+    // --- 8. Parameter Updates & UI Sync ---
+    function updateSimParams() {
+      simState.rpm = parseFloat(document.getElementById('slider-rpm').value);
+      simState.targetAzimuth = parseFloat(document.getElementById('slider-bearing').value);
+      simState.targetElevation = parseFloat(document.getElementById('slider-elev').value);
+      simState.targetRange = parseFloat(document.getElementById('slider-range').value);
+      simState.unbalanceG = parseFloat(document.getElementById('slider-unbalance').value);
+      simState.bearingFaultLevel = parseInt(document.getElementById('slider-fault').value);
+
+      document.getElementById('val-rpm').innerText = `${simState.rpm} RPM`;
+      document.getElementById('val-bearing').innerText = `${simState.targetAzimuth >= 0 ? '+' : ''}${simState.targetAzimuth.toFixed(1)}°`;
+      document.getElementById('val-elev').innerText = `${simState.targetElevation >= 0 ? '+' : ''}${simState.targetElevation.toFixed(1)}°`;
+      document.getElementById('val-range').innerText = `${simState.targetRange.toFixed(2)} m`;
+      document.getElementById('val-unbalance').innerText = `${simState.unbalanceG.toFixed(2)} g`;
+
+      const faultLabels = ["None (Clean)", "Minor Cage", "Moderate Outer", "Severe Inner"];
+      document.getElementById('val-fault').innerText = faultLabels[simState.bearingFaultLevel];
+
+      // Calculate Bearing Fault Frequencies
+      const fr = simState.rpm / 60.0;
+      const gamma = 7.5 / 30.0; // SKF 6202 approx geometry
+      const bpfo = 4.0 * fr * (1.0 - gamma);
+      const bpfi = 4.0 * fr * (1.0 + gamma);
+      const bsf = (30.0 / 15.0) * fr * (1.0 - gamma * gamma);
+
+      document.getElementById('txt-1x').innerText = `${fr.toFixed(1)} Hz`;
+      document.getElementById('txt-bpfo').innerText = `${bpfo.toFixed(1)} Hz`;
+      document.getElementById('txt-bpfi').innerText = `${bpfi.toFixed(1)} Hz`;
+      document.getElementById('txt-bsf').innerText = `${bsf.toFixed(1)} Hz`;
+
+      // Update ISO Severity Gauge
+      const dynVib = simState.unbalanceG * 9.81 * 0.707; // RMS in mm/s approx
+      const segA = document.getElementById('seg-a');
+      const segB = document.getElementById('seg-b');
+      const segC = document.getElementById('seg-c');
+      const segD = document.getElementById('seg-d');
+      const isoText = document.getElementById('iso-status-text');
+
+      segA.classList.remove('active'); segB.classList.remove('active');
+      segC.classList.remove('active'); segD.classList.remove('active');
+
+      if (dynVib < 0.71) {
+        segA.classList.add('active');
+        isoText.innerText = "CLASS I / GOOD (0.5 mm/s)";
+        isoText.style.color = "#00ff88";
+      } else if (dynVib < 1.80) {
+        segB.classList.add('active');
+        isoText.innerText = "CLASS I / SATISFACTORY";
+        isoText.style.color = "#ffcc00";
+      } else if (dynVib < 4.50) {
+        segC.classList.add('active');
+        isoText.innerText = "ALERT / UNSATISFACTORY";
+        isoText.style.color = "#ff7700";
+      } else {
+        segD.classList.add('active');
+        isoText.innerText = "DANGER / UNACCEPTABLE";
+        isoText.style.color = "#ff2244";
+      }
+    }
+    updateSimParams();
+
+    // --- 9. Camera Presets ---
+    function setView(preset) {
+      document.querySelectorAll('.view-controls .btn').forEach(b => b.classList.remove('active'));
+      const btn = document.getElementById(`btn-view-${preset}`);
+      if (btn) btn.classList.add('active');
+
+      if (preset === 'iso') {
+        camera.position.set(0, 2.2, 3.4);
+        controls.target.set(0, 0.3, 0.8);
+      } else if (preset === 'top') {
+        camera.position.set(0, 4.0, 1.2);
+        controls.target.set(0, 0, 1.2);
+      } else if (preset === 'front') {
+        camera.position.set(0, 0.35, -1.2);
+        controls.target.set(0, 0.35, 1.2);
+      } else if (preset === 'side') {
+        camera.position.set(3.5, 0.6, 1.2);
+        controls.target.set(0, 0.35, 1.2);
+      }
+    }
+
+    function toggleHeatCloud() {
+      simState.showHeatCloud = !simState.showHeatCloud;
+      heatCloud.visible = simState.showHeatCloud;
+    }
+
+    // --- 10. Animation & Physics Loop ---
+    let frameTime = 0;
+    let lastTs = performance.now();
+    let frameCounter = 0;
+
+    function animate(ts) {
+      requestAnimationFrame(animate);
+
+      const dt = (ts - lastTs) * 0.001;
+      lastTs = ts;
+      frameTime += dt;
+      frameCounter++;
+
+      if (frameCounter % 30 === 0) {
+        document.getElementById('fps-display').innerText = `${Math.round(1 / Math.max(0.001, dt))} FPS WebGL`;
+      }
+
+      // 1. Calculate Motor 3D Position from Spherical Coordinates
+      const azRad = THREE.MathUtils.degToRad(simState.targetAzimuth);
+      const elRad = THREE.MathUtils.degToRad(simState.targetElevation);
+      const r = simState.targetRange;
+
+      const motorX = r * Math.sin(azRad) * Math.cos(elRad);
+      const motorY = 0.12 + r * Math.sin(elRad);
+      const motorZ = r * Math.cos(azRad) * Math.cos(elRad);
+
+      motorGroup.position.set(motorX, motorY, motorZ);
+      motorGroup.rotation.y = -azRad;
+
+      // Shaft & Tachometer Rotation
+      const rotSpeed = (simState.rpm / 60.0) * Math.PI * 2;
+      shaft.rotation.x += rotSpeed * dt;
+      tacho.rotation.x += rotSpeed * dt;
+
+      // 2. Update Volumetric Heat Cloud around Motor
+      if (simState.showHeatCloud) {
+        const positions = heatGeo.attributes.position.array;
+        const colors = heatGeo.attributes.color.array;
+        for (let i = 0; i < heatCloudCount; i++) {
+          const theta = Math.random() * Math.PI * 2;
+          const phi = (Math.random() - 0.5) * Math.PI;
+          const dist = 0.05 + Math.random() * 0.32;
+
+          positions[i * 3 + 0] = motorX + dist * Math.cos(phi) * Math.sin(theta);
+          positions[i * 3 + 1] = motorY + dist * Math.sin(phi);
+          positions[i * 3 + 2] = motorZ + dist * Math.cos(phi) * Math.cos(theta);
+
+          // Thermal gradient: close = red, far = cyan
+          const tNorm = 1.0 - (dist / 0.32);
+          colors[i * 3 + 0] = Math.min(1.0, tNorm * 1.8);
+          colors[i * 3 + 1] = Math.max(0.0, 1.0 - Math.abs(tNorm - 0.5) * 2.0);
+          colors[i * 3 + 2] = Math.max(0.0, 1.0 - tNorm * 1.5);
+        }
+        heatGeo.attributes.position.needsUpdate = true;
+        heatGeo.attributes.color.needsUpdate = true;
+      }
+
+      // 3. Update Acoustic Ray Beam Line
+      const pts = [new THREE.Vector3(0, 0.01, 0), new THREE.Vector3(motorX, motorY, motorZ)];
+      beamLine.geometry.setFromPoints(pts);
+
+      controls.update();
+      renderer.render(scene, camera);
+
+      // 4. Render 2D Overlays
+      renderPolarRadar(simState.targetAzimuth, r);
+      renderOscilloscope(frameTime);
+      renderOrderTrackingFFT(frameTime);
+      renderVibrationOrbit(frameTime);
+    }
+
+    // --- 11. 2D Radar Canvas Renderer ---
+    function renderPolarRadar(azimuthDeg, rangeM) {
+      const w = polarCanvas.width;
+      const h = polarCanvas.height;
+      const ctx = polarCtx;
+      ctx.clearRect(0, 0, w, h);
+
+      const cx = w / 2;
+      const cy = h - 14;
+      const radius = Math.min(w * 0.44, h * 0.88);
+
+      // Radar Arc Background
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, Math.PI, 2 * Math.PI);
+      ctx.fillStyle = 'rgba(0, 15, 30, 0.7)';
+      ctx.fill();
+
+      // Range Concentric Arcs
+      ctx.strokeStyle = 'rgba(0, 240, 255, 0.18)';
+      ctx.lineWidth = 1;
+      for (let f of [0.33, 0.66, 1.0]) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius * f, Math.PI, 2 * Math.PI);
+        ctx.stroke();
+      }
+
+      // Angle Guidelines (-60, -30, 0, +30, +60 deg)
+      for (let ang of [-60, -30, 0, 30, 60]) {
+        const rRad = THREE.MathUtils.degToRad(ang - 90);
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + radius * Math.cos(rRad), cy + radius * Math.sin(rRad));
+        ctx.stroke();
+      }
+
+      // Rotating Radar Sweep Arm
+      const sweepAng = ((frameTime * 1.5) % Math.PI) - Math.PI / 2;
+      const sweepRad = sweepAng - Math.PI / 2;
+      ctx.strokeStyle = 'rgba(0, 240, 255, 0.55)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + radius * Math.cos(sweepRad), cy + radius * Math.sin(sweepRad));
+      ctx.stroke();
+
+      // Detected Target Hotspot
+      const targetRad = THREE.MathUtils.degToRad(azimuthDeg - 90);
+      const targetDistPx = (rangeM / 3.0) * radius;
+      const tx = cx + targetDistPx * Math.cos(targetRad);
+      const ty = cy + targetDistPx * Math.sin(targetRad);
+
+      // Glow & Target Lock Reticle
+      const grad = ctx.createRadialGradient(tx, ty, 2, tx, ty, 24);
+      grad.addColorStop(0, 'rgba(255, 34, 68, 0.9)');
+      grad.addColorStop(0.5, 'rgba(255, 180, 0, 0.4)');
+      grad.addColorStop(1, 'rgba(255, 34, 68, 0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(tx, ty, 24, 0, 2 * Math.PI);
+      ctx.fill();
+
+      ctx.strokeStyle = '#00f0ff';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(tx, ty, 8, 0, 2 * Math.PI);
+      ctx.moveTo(tx - 12, ty); ctx.lineTo(tx + 12, ty);
+      ctx.moveTo(tx, ty - 12); ctx.lineTo(tx, ty + 12);
+      ctx.stroke();
+    }
+
+    // --- 12. 4-Channel Oscilloscope Canvas Renderer ---
+    function renderOscilloscope(t) {
+      const w = oscCanvas.width;
+      const h = oscCanvas.height;
+      const ctx = oscCtx;
+      ctx.clearRect(0, 0, w, h);
+
+      // Grid
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+      ctx.lineWidth = 1;
+      for (let y = 0; y < h; y += h / 4) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+      }
+
+      // Draw 4 Microphones with Phase Shifts
+      const colors = ['#00f0ff', '#00ff88', '#ffcc00', '#ff3366'];
+      const gains = [1.09, 2.47, 1.00, 1.41]; // Empirical calibration gains
+      const tauPhase = THREE.MathUtils.degToRad(simState.targetAzimuth) * 2.5;
+
+      for (let ch = 0; ch < 4; ch++) {
+        ctx.strokeStyle = colors[ch];
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        const baseH = (h / 8) + ch * (h / 4);
+        for (let x = 0; x < w; x += 3) {
+          const sampleT = t * 12.0 + (x / w) * 6.0;
+          const phase = ch * tauPhase;
+          const amp = Math.sin(sampleT + phase) * 0.6 + Math.sin(sampleT * 2.3) * 0.25;
+          const noise = (Math.random() - 0.5) * 0.08;
+          const y = baseH + (amp * gains[ch] * 0.28 + noise) * (h / 5);
+          if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+    }
+
+    // --- 13. Order-Tracking FFT Spectrum Canvas Renderer ---
+    function renderOrderTrackingFFT(t) {
+      const w = fftCanvas.width;
+      const h = fftCanvas.height;
+      const ctx = fftCtx;
+      ctx.clearRect(0, 0, w, h);
+
+      // Grid
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
+      ctx.lineWidth = 1;
+      for (let x = 0; x < w; x += w / 5) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+      }
+
+      // Spectrum curve with 1X, 2X, 3X peaks
+      const fr = simState.rpm / 60.0;
+      const unbalance = simState.unbalanceG;
+      ctx.strokeStyle = '#00ff88';
+      ctx.fillStyle = 'rgba(0, 255, 136, 0.12)';
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.moveTo(0, h);
+
+      for (let x = 0; x < w; x += 2) {
+        const freq = (x / w) * 250.0; // 0 to 250 Hz
+        let val = 0.05 + Math.random() * 0.02; // noise floor
+
+        // 1X Peak
+        const d1 = Math.abs(freq - fr);
+        val += (unbalance * 0.7) * Math.exp(-d1 * d1 / 4.0);
+
+        // 2X Peak (Misalignment)
+        const d2 = Math.abs(freq - 2 * fr);
+        val += (unbalance * 0.35) * Math.exp(-d2 * d2 / 5.0);
+
+        // 3X Peak
+        const d3 = Math.abs(freq - 3 * fr);
+        val += (unbalance * 0.18) * Math.exp(-d3 * d3 / 6.0);
+
+        // Bearing BPFO impulses if fault active
+        if (simState.bearingFaultLevel > 0) {
+          const bpfo = 4.0 * fr * 0.75;
+          const dFault = Math.abs(freq - bpfo);
+          val += (simState.bearingFaultLevel * 0.22) * Math.exp(-dFault * dFault / 4.0);
+        }
+
+        const y = h - Math.min(h - 4, val * (h * 0.8));
+        ctx.lineTo(x, y);
+      }
+      ctx.lineTo(w, h);
+      ctx.fill();
+      ctx.stroke();
+
+      // Peak Labels
+      ctx.fillStyle = '#ffcc00';
+      ctx.font = '9px monospace';
+      const x1 = (fr / 250.0) * w;
+      if (x1 > 10 && x1 < w - 20) ctx.fillText(`1X (${fr.toFixed(0)}Hz)`, x1 - 14, 18);
+    }
+
+    // --- 14. 3D Vibration Orbit (Lissajous Ellipse) ---
+    function renderVibrationOrbit(t) {
+      const w = orbitCanvas.width;
+      const h = orbitCanvas.height;
+      const ctx = orbitCtx;
+      ctx.clearRect(0, 0, w, h);
+
+      const cx = w / 2;
+      const cy = h / 2;
+      const rMax = Math.min(cx, cy) * 0.8;
+
+      // Crosshairs
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx, 0); ctx.lineTo(cx, h);
+      ctx.moveTo(0, cy); ctx.lineTo(w, cy);
+      ctx.stroke();
+
+      // Elliptical trajectory based on shaft unbalance and phase
+      ctx.strokeStyle = '#ff3366';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+
+      const nPts = 120;
+      const unbalance = Math.min(1.0, simState.unbalanceG * 0.8);
+      const phaseDiff = Math.PI / 3;
+
+      for (let i = 0; i <= nPts; i++) {
+        const th = (i / nPts) * Math.PI * 2;
+        const ax = Math.sin(th + t * 4.0) * unbalance * rMax;
+        const ay = Math.sin(th + phaseDiff + t * 4.0) * unbalance * rMax * 0.75;
+        const jitterX = (Math.random() - 0.5) * 2;
+        const jitterY = (Math.random() - 0.5) * 2;
+
+        const x = cx + ax + jitterX;
+        const y = cy + ay + jitterY;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      // Dynamic RMS indicator dot
+      ctx.fillStyle = '#00f0ff';
+      ctx.beginPath();
+      ctx.arc(cx, cy, 3, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+
+    // Start Animation Loop
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>

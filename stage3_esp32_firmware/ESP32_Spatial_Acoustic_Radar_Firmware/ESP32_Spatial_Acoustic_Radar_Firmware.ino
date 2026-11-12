@@ -369,7 +369,8 @@ void loop() {
             hdr.sample_rate = SAMPLE_RATE;
             hdr.block_frames = CHUNK_FRAMES;
             hdr.num_vib = num_vib;
-            hdr.reserved = adxl_present ? 0x01 : 0x00; // Bit 0: ADXL345 Hardware Healthy / Connected
+            uint8_t pin4_state = digitalRead(FC03_DO_PIN) ? 0x02 : 0x00;
+            hdr.reserved = (adxl_present ? 0x01 : 0x00) | pin4_state; // Bit 0: ADXL345, Bit 1: GPIO4 state
             hdr.tach_pulses = pulses;
 
             // 16-bit XOR Checksum across header, vibration payload, and audio chunk
