@@ -1,27 +1,13 @@
 @echo off
 setlocal EnableExtensions
 chcp 65001 >nul
-title Spatial Multimodal Edge-AI - Rotating Machinery Fault Detection and Localization
+title Spatial Multimodal Edge-AI - Rotating Machinery Fault Detection
 color 0B
 cls
 
 echo +==============================================================================+
-echo ^|        SPATIAL MULTIMODAL EDGE-AI FOR ROTATING MACHINERY DIAGNOSTICS         ^|
-echo ^|      ECE Minor Project Evaluation  -  Live Multimodal Sensor Fusion HUD      ^|
-echo +==============================================================================+
-echo ^|                                                                              ^|
-echo ^|  CORE MINOR PROJECT VISION:                                                  ^|
-echo ^|    Single sensors are blind: Vibration has zero spatial awareness, while     ^|
-echo ^|    an Acoustic hotspot is not automatically a mechanical fault.              ^|
-echo ^|                                                                              ^|
-echo ^|    By co-fusing 3 physical modalities in real time:                          ^|
-echo ^|      [1] 4x INMP441 Mic ULA  --^>  SRP-PHAT 2D Acoustic Camera (WHERE IS IT?) ^|
-echo ^|      [2] ADXL345 3-Axis Vib  --^>  400 Hz Dynamic g and ISO Velocity (Zone)   ^|
-echo ^|      [3] FC-03 Optical Tach  --^>  Exact Shaft RPM and 1x/2x/3x Orders        ^|
-echo ^|                                                                              ^|
-echo ^|    The system answers BOTH:                                                  ^|
-echo ^|      * WHAT IS WRONG?   (Unbalance 1x, Misalignment 2x, Impact, or Noise)    ^|
-echo ^|      * WHERE IS IT?     (Real-Time DOA Bearing Angle [-90 to +90 deg])       ^|
+echo ^|      SPATIAL MULTIMODAL EDGE-AI FOR ROTATING MACHINERY DIAGNOSTICS           ^|
+echo ^|      ECE Minor Project - Live Multimodal Sensor Fusion HUD                   ^|
 echo +==============================================================================+
 echo.
 
@@ -37,10 +23,8 @@ if exist "%~dp0stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py" (
 
 if not defined PROJECT_DIR (
     color 0C
-    echo [ERROR] Could not locate stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py
-    echo         Please verify the repository is in:
-    echo         C:\Users\Yogi\Downloads\Spatial-accoustic-project
-    echo.
+    echo [ERROR] Could not locate spatial_acoustic_radar_pro.py
+    echo         Check: C:\Users\Yogi\Downloads\Spatial-accoustic-project
     pause
     exit /b 1
 )
@@ -48,73 +32,110 @@ if not defined PROJECT_DIR (
 cd /d "%PROJECT_DIR%"
 set "PYTHONUNBUFFERED=1"
 
-:: 2. Locate Python binary
+:: 2. Locate Python binary (Fixed path fallback)
 set "PYTHON_BIN=C:\Python314\python.exe"
 if not exist "%PYTHON_BIN%" (
+    set "PYTHON_BIN="
     for /f "delims=" %%I in ('where python 2^>nul') do (
         if not defined PYTHON_BIN set "PYTHON_BIN=%%I"
     )
 )
-if not exist "%PYTHON_BIN%" set "PYTHON_BIN=python"
+if not defined PYTHON_BIN set "PYTHON_BIN=python"
 
-:: 3. Auto-apply GUI layout fix if fix_radar_ui.py is present
-if exist "fix_radar_ui.py" (
-    "%PYTHON_BIN%" "fix_radar_ui.py" >nul 2>&1
-)
-
-:: 4. Auto-detect active ESP32 COM port
-set "DETECTED_PORT=COM8"
+:: 3. Scan genuine streaming ESP32 COM port
+set "STREAMING_PORT=NONE"
 if exist "tools\find_port.py" (
-    for /f "delims=" %%P in ('"%PYTHON_BIN%" "tools\find_port.py" 2^>nul') do (
-        set "DETECTED_PORT=%%P"
+    for /f "delims=" %%P in ('"%PYTHON_BIN%" "tools\find_port.py" --check-streaming 2^>nul') do (
+        set "STREAMING_PORT=%%P"
     )
 )
 
-echo  +----------------------------------------------------------------------------+
-echo  ^| SYSTEM TELEMETRY CONFIGURATION                                             ^|
-echo  +----------------------------------------------------------------------------+
-echo    Workspace Root : %CD%
-echo    Python Engine  : %PYTHON_BIN%
-echo    ESP32 Link     : %DETECTED_PORT% @ 921,600 Baud (Auto-Detected Type 0x05 Streamer)
-echo    Tachometer ISR : Zero-Debounce Direct ISR (Ultra-Fast, Supports >100,000+ RPM)
-echo    Array Geometry : 4-Mic INMP441 ULA (Pitch: 20.32 mm, Span: 60.96 mm)
-echo  +----------------------------------------------------------------------------+
+echo  Workspace : %CD%
+echo  Python    : %PYTHON_BIN%
+if "%STREAMING_PORT%"=="NONE" (
+    echo  Hardware  : ESP32 not streaming telemetry ^(Simulation ^& Laptop Mic active^)
+) else (
+    echo  Hardware  : ESP32 telemetry active on %STREAMING_PORT% @ 921600 Baud
+)
 echo.
 
-:: 5. Scan and display all active COM ports
-powershell -NoProfile -Command "$ports = [System.IO.Ports.SerialPort]::GetPortNames(); if ($ports) { Write-Host ('  [+] Active Serial Ports Detected : ' + ($ports -join ', ')) -ForegroundColor Green } else { Write-Host '  [!] No COM Ports Detected        : Launching in Standby / Demo Mode (Press T)' -ForegroundColor Yellow }"
+:: 4. Display serial ports via PowerShell
+powershell -NoProfile -Command "$p=[System.IO.Ports.SerialPort]::GetPortNames(); if($p){Write-Host ('  [+] Detected COM Ports: '+($p -join ', ')) -ForegroundColor Green}else{Write-Host '  [!] No COM Ports - Demo/Mic modes available' -ForegroundColor Yellow}"
 
-:: 6. Verify core Python dependencies
-"%PYTHON_BIN%" -c "import numpy, scipy, matplotlib, sounddevice" >nul 2>&1
+:: 5. Check dependencies (numpy, scipy, matplotlib, sounddevice, serial)
+"%PYTHON_BIN%" -c "import numpy, scipy, matplotlib, sounddevice, serial" >nul 2>&1
 if errorlevel 1 (
     color 0C
     echo.
-    echo  [ERROR] Missing required Python packages: numpy, scipy, matplotlib, sounddevice
-    echo  Run: "%PYTHON_BIN%" -m pip install numpy scipy matplotlib sounddevice pyserial
-    echo.
+    echo [ERROR] Missing required packages. Run:
+    echo   "%PYTHON_BIN%" -m pip install numpy scipy matplotlib sounddevice pyserial
     pause
     exit /b 1
 )
 
 echo.
 echo  +----------------------------------------------------------------------------+
-echo  ^| INTERACTIVE LIVE DEMONSTRATION CONTROLS                                    ^|
+echo  ^|  SELECT INPUT SOURCE ^& OPERATING MODE                                       ^|
 echo  +----------------------------------------------------------------------------+
-echo  ^|  [B] Lock Golden Baseline      [C] Clear Baseline      [P] Cycle Tach PPR  ^|
-echo  ^|  [T] Cycle Motor Fault Demos   [I] Flip Mic Polarity   [K] Phase Calib     ^|
-echo  ^|  [1] Laptop Internal Mic       [2] ESP32 4-Mic Array   [Q] Quit Radar      ^|
+echo  ^|  [1]  ACTIVE RADAR HUD    - Auto-Select (Uses Simulator or ESP32 if live)   ^|
+echo  ^|  [2]  PC MICROPHONE MODE  - Live Audio from Laptop Mic (Real Sound Input)   ^|
+echo  ^|  [3]  MOTOR SIMULATOR     - High-Speed Test (10k-100k RPM with [UP/DN] keys)^|
+echo  ^|  [4]  DIAGNOSTIC HUD      - Compact Right-Panel (Speed Dial + Fault + DOA)  ^|
 echo  +----------------------------------------------------------------------------+
 echo.
-echo  [+] Launching Spatial Multimodal Acoustic Radar Pro HUD on %DETECTED_PORT%...
+set /p "LAUNCH_CHOICE=  Enter choice (1, 2, 3, or 4) [default=1]: "
+if "%LAUNCH_CHOICE%"=="" set "LAUNCH_CHOICE=1"
+
+echo.
+echo  Controls: [1] PC Mic  [2] ESP32  [3] Sim  [UP/DN] Sim RPM  [P] PPR  [B] Baseline  [Q] Quit
 echo.
 
-"%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py" --port %DETECTED_PORT% %*
+if "%LAUNCH_CHOICE%"=="2" goto :launch_mic
+if "%LAUNCH_CHOICE%"=="3" goto :launch_sim
+if "%LAUNCH_CHOICE%"=="4" goto :launch_diag
 
+:launch_auto
+if "%STREAMING_PORT%"=="NONE" (
+    echo  [*] Launching Radar in High-Speed Motor Simulator Mode (Active Inputs)...
+    echo      (All 7 panels active! Press [UP]/[DOWN] or [+][-] to change RPM)
+    echo      (Press '1' anytime inside the GUI to switch to Laptop Microphone)
+    echo.
+    "%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py" --source synthetic --rpm 24000 %*
+) else (
+    echo  [+] Launching Live Hardware Radar on %STREAMING_PORT%...
+    echo.
+    "%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py" --source esp32 --port %STREAMING_PORT% %*
+)
+goto :check_exit
+
+:launch_mic
+echo  [+] Launching Radar in PC / Laptop Microphone Input Mode...
+echo      (Speak, whistle, or run motor near laptop mic to see live acoustic inputs)
+echo.
+"%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py" --source laptop %*
+goto :check_exit
+
+:launch_sim
+echo  [+] Launching High-Speed Motor Simulator Mode (24,000 RPM baseline)...
+echo      (Press [UP]/[DOWN] or [+][-] to dynamically change RPM from 1k to 100k+ RPM)
+echo.
+"%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\spatial_acoustic_radar_pro.py" --source synthetic --rpm 24000 %*
+goto :check_exit
+
+:launch_diag
+echo  [+] Launching Compact Diagnostic HUD...
+echo.
+if "%STREAMING_PORT%"=="NONE" (
+    "%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\diagnostic_hud.py" --source synthetic --rpm 24000 %*
+) else (
+    "%PYTHON_BIN%" "stage4_realtime_fusion_radar\src\diagnostic_hud.py" --source esp32 --port %STREAMING_PORT% %*
+)
+goto :check_exit
+
+:check_exit
 if errorlevel 1 (
     color 0C
     echo.
-    echo +==============================================================================+
-    echo ^| [ERROR] Radar GUI exited with code %ERRORLEVEL%. See diagnostic output above.         ^|
-    echo +==============================================================================+
+    echo [ERROR] GUI exited with an error. See output above.
     pause
 )

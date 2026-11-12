@@ -96,19 +96,54 @@ def run_continuous_probe(port: str = "auto", baud: int = 921600, ppr: int = 1):
             if b2 != b'\x55':
                 continue
 
-            hdr_bytes = ser.read(18)
-            if len(hdr_bytes) != 18:
+            b3 = ser.read(1)
+            if not b3:
                 continue
+            pkt_type = ord(b3)
 
-            pkt_type, seq, sr, ch, blk, ax, ay, az, pulses = struct.unpack('<BHHBHHhhI', hdr_bytes)
-            if ch not in (2, 4) or blk == 0 or blk > 2048:
-                continue
+            if pkt_type == 0x05:
+                # Type 0x05: 13 remaining header bytes: channels(1), seq(2), fs(2), block(2), num_vib(1), reserved(1), pulses(4)
+                hdr_rem = ser.read(13)
+                if len(hdr_rem) != 13:
+                    continue
+                ch, seq, sr, blk, num_vib, res, pulses = struct.unpack('<BHHHBBI', hdr_rem)
+                if ch not in (2, 4) or blk == 0 or blk > 2048:
+                    continue
 
-            payload_len = blk * ch * 2
-            pcm_data = ser.read(payload_len)
-            chk_bytes = ser.read(2)
+                # Read vibration FIFO payload
+                vib_len = num_vib * 6
+                vib_data = ser.read(vib_len) if vib_len > 0 else b""
+                if len(vib_data) != vib_len:
+                    continue
 
-            if len(pcm_data) != payload_len or len(chk_bytes) != 2:
+                # Extract latest vibration sample (int16 mg -> g)
+                if num_vib > 0:
+                    last_ax, last_ay, last_az = struct.unpack('<hhh', vib_data[-6:])
+                    ax, ay, az = last_ax, last_ay, last_az
+                else:
+                    ax, ay, az = 0, 0, -820
+
+                payload_len = blk * ch * 2
+                pcm_data = ser.read(payload_len)
+                chk_bytes = ser.read(2)
+                if len(pcm_data) != payload_len or len(chk_bytes) != 2:
+                    continue
+
+            elif pkt_type == 0x04:
+                # Legacy Type 0x04: 17 remaining header bytes: seq(2), sr(2), ch(1), blk(2), ax(2), ay(2), az(2), pulses(4)
+                hdr_rem = ser.read(17)
+                if len(hdr_rem) != 17:
+                    continue
+                seq, sr, ch, blk, ax, ay, az, pulses = struct.unpack('<HHBHHhhI', hdr_rem)
+                if ch not in (2, 4) or blk == 0 or blk > 2048:
+                    continue
+
+                payload_len = blk * ch * 2
+                pcm_data = ser.read(payload_len)
+                chk_bytes = ser.read(2)
+                if len(pcm_data) != payload_len or len(chk_bytes) != 2:
+                    continue
+            else:
                 continue
 
             samples = np.frombuffer(pcm_data, dtype=np.int16)

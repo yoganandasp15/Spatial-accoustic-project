@@ -1782,64 +1782,111 @@ SerialAudioSource = ESP32MultimodalSource
 
 
 class Synthetic4ChSource(AudioSourceBase):
-    """Simulates a 4-channel orbiting acoustic emitter with 3-axis vibration and shaft tachometer."""
+    """
+    Simulates a 4-channel orbiting acoustic emitter with 3-axis vibration and shaft tachometer.
+    Supports dynamic RPM tuning from 60 RPM to 120,000 RPM with accurate pulse accumulation,
+    harmonic acoustic signature synthesis (1X, 2X, 3X, BPF), and 3-axis ADXL345 dynamic vibration.
+    """
 
-    def __init__(self, fs: float = 16000.0):
+    def __init__(self, fs: float = 16000.0, target_rpm: float = 24000.0, ppr: int = 1):
         self.fs = fs
         self.channels = 4
         self.frame_len = 512
         self.t_phase = 0.0
-        self.pulses = 120
+        self.target_rpm = float(target_rpm)
+        self.ppr = max(1, int(ppr))
+        self.pulses = 0
+        self.pulse_float = 0.0
+        self.lock = threading.Lock()
+        self.cached_frame = np.zeros((self.frame_len, self.channels), dtype=np.float32)
+
+    def set_rpm(self, rpm: float):
+        with self.lock:
+            self.target_rpm = max(0.0, min(200000.0, float(rpm)))
+
+    def adjust_rpm(self, delta_rpm: float):
+        with self.lock:
+            self.target_rpm = max(0.0, min(200000.0, self.target_rpm + float(delta_rpm)))
+
+    def set_ppr(self, ppr: int):
+        with self.lock:
+            self.ppr = max(1, int(ppr))
 
     def start(self): pass
     def stop(self): pass
 
     def get_frame(self) -> np.ndarray:
-        t = np.arange(self.frame_len) / self.fs + self.t_phase
-        self.t_phase += self.frame_len / self.fs
+        with self.lock:
+            cur_rpm = self.target_rpm
+            cur_ppr = self.ppr
 
-        # Move source sinusoidally across [-40 deg, +40 deg]
+        dt = self.frame_len / self.fs
+        t = np.arange(self.frame_len) / self.fs + self.t_phase
+        self.t_phase += dt
+
+        # Pulse Accumulator: pulse rate f_p = (RPM / 60) * PPR
+        pulse_delta = (cur_rpm / 60.0) * cur_ppr * dt
+        self.pulse_float += pulse_delta
+        n_new = int(self.pulse_float)
+        self.pulses = (self.pulses + n_new) & 0xFFFFFFFF
+        self.pulse_float -= n_new
+
+        # Move source sinusoidally across [-40 deg, +40 deg] for acoustic localization
         angle_deg = 35.0 * np.sin(2.0 * np.pi * 0.28 * self.t_phase)
         angle_rad = np.deg2rad(angle_deg)
         d_pitch = 0.02032
         mic_x = np.array([-1.5, -0.5, +0.5, +1.5]) * d_pitch
 
-        # Multi-harmonic rotating machinery audio signature with exact continuous sub-sample delays
+        # Motor shaft frequency f0 and harmonics
+        f0 = max(10.0, cur_rpm / 60.0)
+        f_max = 0.45 * self.fs
+        f_1x = f0 if f0 < f_max else (f0 % f_max)
+        f_2x = (2.0 * f0) if (2.0 * f0) < f_max else ((2.0 * f0) % f_max)
+        f_3x = (3.0 * f0) if (3.0 * f0) < f_max else ((3.0 * f0) % f_max)
+
         out = np.zeros((self.frame_len, 4), dtype=np.float32)
         for i in range(4):
             delay_s = (mic_x[i] * np.sin(angle_rad)) / SPEED_OF_SOUND
             t_i = t + delay_s
             sig_i = (
-                0.60 * np.sin(2 * np.pi * 1200.0 * t_i)
-                + 0.25 * np.sin(2 * np.pi * 2400.0 * t_i)
-                + 0.10 * np.sin(2 * np.pi * 3600.0 * t_i)
+                0.55 * np.sin(2 * np.pi * f_1x * t_i)
+                + 0.25 * np.sin(2 * np.pi * f_2x * t_i)
+                + 0.12 * np.sin(2 * np.pi * f_3x * t_i)
                 + 0.03 * np.random.randn(self.frame_len)
             ).astype(np.float32)
             out[:, i] = sig_i
 
-        self.pulses += int(np.random.randint(1, 4))
+        self.cached_frame = out.copy()
         return out
 
     def get_fs(self) -> float: return self.fs
     def get_channels(self) -> int: return self.channels
+
     def get_multimodal_telemetry(self) -> Dict[str, object]:
-        vib_x = 0.12 * math.sin(2.0 * math.pi * 18.0 * self.t_phase)
-        vib_y = 0.15 * math.cos(2.0 * math.pi * 18.0 * self.t_phase)
-        vib_z = -0.82 + 0.08 * math.sin(2.0 * math.pi * 36.0 * self.t_phase)
-        rpm = 1080.0 + 20.0 * math.sin(self.t_phase)
+        with self.lock:
+            cur_rpm = self.target_rpm
+            cur_pulses = self.pulses
+            cur_ppr = self.ppr
+
+        f0 = cur_rpm / 60.0
+        vib_x = 0.18 * math.sin(2.0 * math.pi * min(f0, 180.0) * self.t_phase)
+        vib_y = 0.22 * math.cos(2.0 * math.pi * min(f0, 180.0) * self.t_phase)
+        vib_z = -0.82 + 0.10 * math.sin(4.0 * math.pi * min(f0, 180.0) * self.t_phase)
 
         rms_counts = [
-            float(np.sqrt(np.mean(self.get_frame()[:, i]**2)) * 12000.0) for i in range(4)
+            float(np.sqrt(np.mean(self.cached_frame[:, i]**2)) * 12000.0) for i in range(4)
         ]
 
         return {
             "ax_g": vib_x, "ay_g": vib_y, "az_g": vib_z,
-            "rpm_pulses": self.pulses,
-            "estimated_rpm": rpm,
-            "firmware_mode": "SYNTHETIC 4-CH ARRAY SIMULATION",
+            "rpm_pulses": cur_pulses,
+            "estimated_rpm": cur_rpm * cur_ppr,
+            "firmware_mode": f"HIGH-SPEED MOTOR SIMULATOR ({cur_rpm:,.0f} RPM)",
             "rms_counts": rms_counts,
             "peak_counts": [int(v * 1.45) for v in rms_counts],
-            "is_hardware_alive": True
+            "is_hardware_alive": True,
+            "target_rpm": cur_rpm,
+            "shaft_f0_hz": f0
         }
 
     def get_vibration_history(self, max_samples: int = 512) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -1847,9 +1894,11 @@ class Synthetic4ChSource(AudioSourceBase):
         fs_sim = 400.0
         n_samples = min(max_samples, 256)
         t_arr = np.linspace(t_now - n_samples / fs_sim, t_now, n_samples)
-        vib_x = (0.12 * np.sin(2.0 * np.pi * 18.0 * t_arr)).astype(np.float32)
-        vib_y = (0.15 * np.cos(2.0 * np.pi * 18.0 * t_arr)).astype(np.float32)
-        vib_z = (-0.82 + 0.08 * np.sin(2.0 * np.pi * 36.0 * t_arr)).astype(np.float32)
+        with self.lock:
+            f0 = min(self.target_rpm / 60.0, 180.0)
+        vib_x = (0.22 * np.sin(2.0 * np.pi * f0 * t_arr)).astype(np.float32)
+        vib_y = (0.25 * np.cos(2.0 * np.pi * f0 * t_arr)).astype(np.float32)
+        vib_z = (-0.82 + 0.12 * np.sin(4.0 * np.pi * f0 * t_arr)).astype(np.float32)
         return t_arr, vib_x, vib_y, vib_z
 
 
@@ -1920,32 +1969,89 @@ class LaptopAudioSource(AudioSourceBase):
     def get_fs(self) -> float: return self.fs
     def get_channels(self) -> int: return self.channels
     def get_multimodal_telemetry(self) -> Dict[str, object]:
+        with self.lock:
+            frame_copy = self.buffer.copy()
+
+        # Acoustic peak frequency estimation for acoustic tachometer capability
+        acoustic_rpm = 0.0
+        f_peak = 0.0
+        try:
+            mono = np.mean(frame_copy, axis=1)
+            mono_ac = mono - np.mean(mono)
+            if np.max(np.abs(mono_ac)) > 0.01:
+                fft_mag = np.abs(np.fft.rfft(mono_ac * np.hanning(len(mono_ac))))
+                freqs = np.fft.rfftfreq(len(mono_ac), 1.0 / self.fs)
+                mask = (freqs >= 100.0) & (freqs <= 4000.0)
+                if np.any(mask) and np.max(fft_mag[mask]) > 0.1:
+                    f_peak = float(freqs[mask][np.argmax(fft_mag[mask])])
+                    acoustic_rpm = f_peak * 60.0
+        except Exception:
+            pass
+
+        rms_counts = [float(np.sqrt(np.mean(frame_copy[:, i]**2)) * 10000.0) for i in range(4)]
         return {
             "ax_g": 0.0, "ay_g": 0.0, "az_g": -1.0,
-            "rpm_pulses": 0, "estimated_rpm": 0.0,
-            "firmware_mode": f"LAPTOP INTERNAL MIC ({self.channels}-CH)",
-            "rms_counts": [float(np.sqrt(np.mean(self.buffer[:, i]**2))*10000) for i in range(4)],
-            "peak_counts": [1000, 1000, 1000, 1000],
-            "is_hardware_alive": True
+            "rpm_pulses": 0,
+            "estimated_rpm": acoustic_rpm,
+            "firmware_mode": f"LAPTOP INTERNAL MIC ({self.channels}-CH)" + (f" [Acoustic Tone: {f_peak:.0f}Hz]" if f_peak > 0 else ""),
+            "rms_counts": rms_counts,
+            "peak_counts": [int(v * 1.45) for v in rms_counts],
+            "is_hardware_alive": True,
+            "acoustic_rpm": acoustic_rpm
         }
 
 
-# =============================================================================
-# MASTER RADAR PRO 4-CHANNEL HUD APPLICATION
-# =============================================================================
 class AcousticRadarApp:
     """Master Interactive HUD with 4-Microphone Live Inputs and Multimodal Telemetry."""
 
-    def __init__(self, port: str = "auto", baud: int = 921600, pulses_per_rev: int = 1):
-        self.active_source_type = "ESP32"
-        self.active_geometry_key = "ESP32_4MIC_LINEAR"
-        self.geometry = PRESETS[self.active_geometry_key]
-
+    def __init__(self, port: str = "auto", baud: int = 921600, pulses_per_rev: int = 1, source: str = "auto", initial_rpm: float = 24000.0):
         self.sources: Dict[str, AudioSourceBase] = {
             "ESP32": ESP32MultimodalSource(port=port, baudrates=(baud, 921600, 1152000, 115200)),
-            "SYNTHETIC": Synthetic4ChSource(),
+            "SYNTHETIC": Synthetic4ChSource(target_rpm=initial_rpm, ppr=pulses_per_rev),
             "LAPTOP": LaptopAudioSource()
         }
+
+        # Resolve active source mode
+        src_norm = (source or "auto").lower()
+        if src_norm == "laptop":
+            self.active_source_type = "LAPTOP"
+            self.active_geometry_key = "ESP32_4MIC_LINEAR" if self.sources["LAPTOP"].get_channels() >= 4 else "LAPTOP_DUAL"
+        elif src_norm == "synthetic":
+            self.active_source_type = "SYNTHETIC"
+            self.active_geometry_key = "ESP32_4MIC_LINEAR"
+        elif src_norm == "esp32":
+            self.active_source_type = "ESP32"
+            self.active_geometry_key = "ESP32_4MIC_LINEAR"
+        else:  # "auto"
+            # Check if ESP32 hardware is actively streaming Type 0x05 telemetry packets
+            is_streaming = False
+            try:
+                tools_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "tools")
+                if tools_dir not in sys.path:
+                    sys.path.insert(0, tools_dir)
+                import find_port
+                active_dev = find_port.detect_port(check_streaming=True)
+                if active_dev != "NONE":
+                    is_streaming = True
+            except Exception:
+                pass
+
+            if is_streaming:
+                self.active_source_type = "ESP32"
+                self.active_geometry_key = "ESP32_4MIC_LINEAR"
+                print(f"\n[+] Live ESP32 Telemetry Detected on {port} @ {baud} Baud (Hardware Mode Active)\n")
+            else:
+                self.active_source_type = "SYNTHETIC"
+                self.active_geometry_key = "ESP32_4MIC_LINEAR"
+                print("\n" + "="*72)
+                print(" [*] NOTICE: ESP32 hardware is not streaming Type 0x05 telemetry.")
+                print(f" [*] Auto-started in High-Speed Motor Simulator Mode ({initial_rpm:,.0f} RPM).")
+                print("     All inputs are LIVE! Use [UP]/[DOWN] or [+][-] to tune motor RPM.")
+                print("     Press '1' for Laptop/PC Microphone (Live soundcard audio input).")
+                print("     Press '2' for ESP32 Hardware | Press '3' for Simulator.")
+                print("="*72 + "\n")
+
+        self.geometry = PRESETS[self.active_geometry_key]
         self.current_source = self.sources[self.active_source_type]
         self.current_source.start()
 
@@ -2016,10 +2122,13 @@ class AcousticRadarApp:
             "DEMO_HEALTHY_1800RPM",
             "DEMO_UNBALANCE_1X",
             "DEMO_MISALIGNMENT_2X",
-            "DEMO_DISTURBANCE_PROOF"
+            "DEMO_DISTURBANCE_PROOF",
+            "DEMO_HIGH_SPEED_25K_RPM",
+            "DEMO_HYPER_SPEED_100K_RPM"
         ]
         self.demo_phase = 0.0
         self.demo_pulses = 120
+        self.demo_pulse_accum = 0.0
         self._last_seen_pulses = -1
         self._last_pulse_blink_time = 0.0
 
@@ -2029,6 +2138,17 @@ class AcousticRadarApp:
         """Returns concise evidence mode tag that never overflows the top header."""
         if getattr(self, "demo_profile_idx", 0) > 0:
             return f"DEMO MODE: {self.demo_profiles[self.demo_profile_idx]} (Press 'T' for Live)"
+        if self.active_source_type == "SYNTHETIC":
+            synth_src = self.sources.get("SYNTHETIC")
+            tgt_rpm = getattr(synth_src, "target_rpm", 24000.0)
+            return f"SIMULATOR: {tgt_rpm:,.0f} RPM (f0={tgt_rpm/60.0:.1f}Hz) | Controls: [UP/DN] or [+/-]"
+        if self.active_source_type == "LAPTOP":
+            lap_src = self.sources.get("LAPTOP")
+            ch_num = getattr(lap_src, "channels", 2)
+            telem = lap_src.get_multimodal_telemetry() if lap_src else {}
+            ac_rpm = telem.get("acoustic_rpm", 0.0)
+            rpm_hint = f" | Acoustic: {ac_rpm:.0f} RPM" if ac_rpm > 100 else ""
+            return f"PC MICROPHONE: {ch_num}-CH Soundcard Ingestion{rpm_hint} (Live Audio Input)"
         if self.active_source_type == "ESP32":
             telemetry = self.current_source.get_multimodal_telemetry()
             is_alive = telemetry.get("is_hardware_alive", False)
@@ -2489,6 +2609,26 @@ class AcousticRadarApp:
             self._switch_source("ESP32", "ESP32_4MIC_LINEAR")
         elif event.key in ("3",):
             self._switch_source("SYNTHETIC", "ESP32_4MIC_LINEAR")
+        elif event.key in ("up", "+", "="):
+            if self.active_source_type == "SYNTHETIC":
+                self.sources["SYNTHETIC"].adjust_rpm(+2500.0)
+                cur_rpm = self.sources["SYNTHETIC"].target_rpm
+                print(f"[+] High-Speed Simulator RPM Increased: {cur_rpm:,.0f} RPM (f0 = {cur_rpm/60.0:.1f} Hz)")
+        elif event.key in ("down", "-", "_"):
+            if self.active_source_type == "SYNTHETIC":
+                self.sources["SYNTHETIC"].adjust_rpm(-2500.0)
+                cur_rpm = self.sources["SYNTHETIC"].target_rpm
+                print(f"[+] High-Speed Simulator RPM Decreased: {cur_rpm:,.0f} RPM (f0 = {cur_rpm/60.0:.1f} Hz)")
+        elif event.key in ("pageup",):
+            if self.active_source_type == "SYNTHETIC":
+                self.sources["SYNTHETIC"].adjust_rpm(+10000.0)
+                cur_rpm = self.sources["SYNTHETIC"].target_rpm
+                print(f"[+] High-Speed Simulator RPM +10k Step: {cur_rpm:,.0f} RPM")
+        elif event.key in ("pagedown",):
+            if self.active_source_type == "SYNTHETIC":
+                self.sources["SYNTHETIC"].adjust_rpm(-10000.0)
+                cur_rpm = self.sources["SYNTHETIC"].target_rpm
+                print(f"[+] High-Speed Simulator RPM -10k Step: {cur_rpm:,.0f} RPM")
         elif event.key in ("m", "g", "M", "G"):
             keys = list(PRESETS.keys())
             idx = (keys.index(self.active_geometry_key) + 1) % len(keys)
@@ -2832,8 +2972,33 @@ class AcousticRadarApp:
                     az_arr = -0.82 + 0.020 * np.sin(4.0 * np.pi * f_shaft * t_sim_arr) + 0.008 * np.random.randn(n_sim_vib)
                     vib_hist = (t_sim_arr, ax_arr.astype(np.float32), ay_arr.astype(np.float32), az_arr.astype(np.float32))
                     ax_g, ay_g, az_g = float(ax_arr[-1]), float(ay_arr[-1]), float(az_arr[-1])
-                    # Injected acoustic noise proves PDF Page 13 disturbance rejection
                     raw_frame = (raw_frame + 0.15 * np.random.randn(*raw_frame.shape)).astype(np.float32)
+                elif demo_name == "DEMO_HIGH_SPEED_25K_RPM":
+                    rpm = 25000.0 + 120.0 * math.sin(self.demo_phase * 2.0)
+                    self.demo_pulse_accum += (rpm / 60.0) * self.pulses_per_rev * (n_sim_vib / 400.0)
+                    n_step = int(self.demo_pulse_accum)
+                    self.demo_pulses = (self.demo_pulses + n_step) & 0xFFFFFFFF
+                    self.demo_pulse_accum -= n_step
+                    pulses = self.demo_pulses
+                    f_shaft = rpm / 60.0
+                    ax_arr = 0.550 * np.sin(2.0 * np.pi * min(f_shaft, 180.0) * t_sim_arr) + 0.040 * np.random.randn(n_sim_vib)
+                    ay_arr = 0.580 * np.cos(2.0 * np.pi * min(f_shaft, 180.0) * t_sim_arr) + 0.040 * np.random.randn(n_sim_vib)
+                    az_arr = -0.82 + 0.220 * np.sin(4.0 * np.pi * min(f_shaft, 180.0) * t_sim_arr) + 0.025 * np.random.randn(n_sim_vib)
+                    vib_hist = (t_sim_arr, ax_arr.astype(np.float32), ay_arr.astype(np.float32), az_arr.astype(np.float32))
+                    ax_g, ay_g, az_g = float(ax_arr[-1]), float(ay_arr[-1]), float(az_arr[-1])
+                elif demo_name == "DEMO_HYPER_SPEED_100K_RPM":
+                    rpm = 100000.0 + 350.0 * math.sin(self.demo_phase * 2.0)
+                    self.demo_pulse_accum += (rpm / 60.0) * self.pulses_per_rev * (n_sim_vib / 400.0)
+                    n_step = int(self.demo_pulse_accum)
+                    self.demo_pulses = (self.demo_pulses + n_step) & 0xFFFFFFFF
+                    self.demo_pulse_accum -= n_step
+                    pulses = self.demo_pulses
+                    f_shaft = rpm / 60.0
+                    ax_arr = 1.150 * np.sin(2.0 * np.pi * min(f_shaft, 180.0) * t_sim_arr) + 0.080 * np.random.randn(n_sim_vib)
+                    ay_arr = 1.200 * np.cos(2.0 * np.pi * min(f_shaft, 180.0) * t_sim_arr) + 0.080 * np.random.randn(n_sim_vib)
+                    az_arr = -0.82 + 0.450 * np.sin(4.0 * np.pi * min(f_shaft, 180.0) * t_sim_arr) + 0.040 * np.random.randn(n_sim_vib)
+                    vib_hist = (t_sim_arr, ax_arr.astype(np.float32), ay_arr.astype(np.float32), az_arr.astype(np.float32))
+                    ax_g, ay_g, az_g = float(ax_arr[-1]), float(ay_arr[-1]), float(az_arr[-1])
 
             motor_diag = self.motor_engine.analyze(raw_frame, fs, ax_g, ay_g, az_g, rpm, vib_history=vib_hist)
             dyn_vib_g = float(motor_diag.get("dyn_vib_g", 0.0))
@@ -3046,15 +3211,17 @@ class AcousticRadarApp:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Spatial Multimodal Acoustic Radar Engine (Pro V6)")
-    parser.add_argument("--port", type=str, default="COM8", help="ESP32 serial port (default: COM8)")
+    parser.add_argument("--port", type=str, default="auto", help="ESP32 serial port (default: auto)")
     parser.add_argument("--baud", type=int, default=921600, help="Serial baudrate (default: 921600)")
     parser.add_argument("--ppr", "--pulses-per-rev", type=int, default=1, help="Tachometer pulses per revolution (default: 1 for single blade, 20 for slotted disc)")
+    parser.add_argument("--source", type=str, default="auto", choices=["auto", "esp32", "laptop", "synthetic"], help="Input source: auto, esp32, laptop (mic), synthetic (simulator)")
+    parser.add_argument("--rpm", type=float, default=24000.0, help="Initial shaft RPM for simulator mode (default: 24000.0)")
     args, _ = parser.parse_known_args()
 
     print("=====================================================================")
     print(" SPATIAL MULTIMODAL ACOUSTIC RADAR ENGINE (PRO V6)")
     print(" 4-Microphone Uniform Linear Array + Multimodal Fault Localization")
-    print(f" Target Serial Port: {args.port} @ {args.baud} Baud | PPR: {args.ppr}")
+    print(f" Source Mode : {args.source.upper()} | Port: {args.port} @ {args.baud} Baud | PPR: {args.ppr}")
     print("=====================================================================")
     print(" Physical Array Mapping on Breadboard:")
     print("   [Mic 1] (Row 20, Pair A Left,  GPIO 19, L/R->GND) -> x = -30.48 mm")
@@ -3064,5 +3231,6 @@ if __name__ == "__main__":
     print(" Total Array Aperture: 60.96 mm | 6 Correlation Delay Pairs")
     print(" ADXL345: SDA=TX2 (GPIO 17), SCL=RX2 (GPIO 16) | FC-03: DO=D4 (GPIO 4)")
     print("=====================================================================")
-    app = AcousticRadarApp(port=args.port, baud=args.baud, pulses_per_rev=args.ppr)
+    app = AcousticRadarApp(port=args.port, baud=args.baud, pulses_per_rev=args.ppr,
+                           source=args.source, initial_rpm=args.rpm)
     app.run()
